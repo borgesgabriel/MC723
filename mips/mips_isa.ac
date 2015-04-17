@@ -31,7 +31,7 @@ AC_ISA(mips){
   ac_instr<Type_I> addi, addiu, slti, sltiu, andi, ori, xori, lui;
   ac_instr<Type_R> add, addu, sub, subu, slt, sltu;
   ac_instr<Type_R> instr_and, instr_or, instr_xor, instr_nor;
-  ac_instr<Type_R> nop, sll, srl, sra, sllv, srlv, srav;
+  ac_instr<Type_R> sll, srl, sra, sllv, srlv, srav;
   ac_instr<Type_R> mult, multu, div, divu;
   ac_instr<Type_R> mfhi, mthi, mflo, mtlo;
   ac_instr<Type_J> j, jal;
@@ -178,8 +178,8 @@ AC_ISA(mips){
     instr_nor.set_asm("nor  %reg, %reg, %reg", rd, rs, rt);
     instr_nor.set_decoder(op=0x00, func=0x27);
 
-    nop.set_asm("nop", rs=0, rt=0, shamt=0);
-    nop.set_decoder(op=0x00, rd=0x00, func=0x00);
+//    nop.set_asm("nop", rs=0, rt=0, shamt=0);
+//    nop.set_decoder(op=0x00, rd=0x00, func=0x00);
 
     sll.set_asm("sll %reg, %reg, %imm", rd, rt, shamt);
     sll.set_decoder(op=0x00, func= 0x00);
