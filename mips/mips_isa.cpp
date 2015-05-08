@@ -94,9 +94,12 @@ struct variables {
   int number_of_hazards;
   int pc_addr;
   int static_wrong_predictions;
+  int saturating_wrong_predictions;
+  int total_number_of_branches;
   static constexpr int kNumberOfStoredInstructions = 10;
   static constexpr bool is_forwarding = false;
   enum pipeline_stages {k5, k7, k13, SIZE};
+  enum saturating_stages {kStronglyNotTaken, kWeaklyNotTaken, kWeaklyTaken, kStronglyTaken} saturating_stage;
   pipeline_stages pipeline_stage = k5;
   std::deque<mips_instruction> latest_instructions;
   const static std::set<std::pair<int, int>> instructions_dont_write;
@@ -105,7 +108,13 @@ struct variables {
 
   std::vector<int> last_write;
 
-  variables(): number_of_instructions(0), number_of_hazards(0), static_wrong_predictions(0) {
+  variables():
+    number_of_instructions(0),
+    number_of_hazards(0),
+    static_wrong_predictions(0),
+    saturating_wrong_predictions(0),
+    total_number_of_branches(0),
+    saturating_stage(kWeaklyTaken) {
     last_write.resize(34);
     hazard_table = {{2, 1, 1}, {1, 1, 1}};
   }
@@ -113,7 +122,11 @@ struct variables {
   void push(mips_instruction inst) {
     read_hazard(inst);
     write_hazard(inst);
-    static_branch_prediction(inst);
+    int taken = actual_branch_taken(inst);
+    if (taken--) {
+      static_branch_prediction(taken, inst);
+      saturating_branch_prediction(taken);
+    }
     std::cout << inst << std::endl;
     latest_instructions.push_front(inst);
     if (latest_instructions.size() > kNumberOfStoredInstructions) {
@@ -162,28 +175,75 @@ struct variables {
     return hazard_table[is_forwarding][pipeline_stage] >= distance;
   }
 
-  void static_branch_prediction(mips_instruction inst) {
+  int actual_branch_taken(mips_instruction inst) {
+    int taken = 0;
     if (inst.type == mips_instruction::kI && branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
-      bool taken;
+      ++taken;
+      total_number_of_branches++;
       switch (inst.op) {
       case 0x01:
-        taken = inst.rt ? inst.rs >= 0 : inst.rs < 0;
+        taken += inst.rt ? inst.rs >= 0 : inst.rs < 0;
         break;
       case 0x04:
-        taken = inst.rs == inst.rt;
+        taken += inst.rs == inst.rt;
         break;
       case 0x05:
-        taken = inst.rs != inst.rt;
+        taken += inst.rs != inst.rt;
         break;
       case 0x06:
-        taken = inst.rs <= 0;
+        taken += inst.rs <= 0;
         break;
       case 0x07:
-        taken = inst.rs > 0;
+        taken += inst.rs > 0;
         break;
       }
-      static_wrong_predictions += taken != inst.imm < pc_addr;
     }
+    return taken;
+  }
+
+  void static_branch_prediction(bool taken, mips_instruction inst) {
+    static_wrong_predictions += taken != inst.imm < pc_addr;
+  }
+
+  void read_saturating_counter(bool taken) {
+    saturating_wrong_predictions += taken != (saturating_stage > kWeaklyNotTaken);
+  }
+
+  void update_saturating_counter(bool taken) {
+    if (taken) {
+      switch (saturating_stage) {
+      case kStronglyNotTaken:
+        saturating_stage = kWeaklyNotTaken;
+        break;
+      case kWeaklyNotTaken:
+        saturating_stage = kWeaklyTaken;
+        break;
+      case kWeaklyTaken:
+        saturating_stage = kStronglyTaken;
+        break;
+      default:
+        break;
+      }
+    } else {
+      switch (saturating_stage) {
+      case kWeaklyNotTaken:
+        saturating_stage = kStronglyNotTaken;
+        break;
+      case kWeaklyTaken:
+        saturating_stage = kWeaklyNotTaken;
+        break;
+      case kStronglyTaken:
+        saturating_stage = kWeaklyTaken;
+        break;
+      default:
+        break;
+      }
+    }
+  }
+
+  void saturating_branch_prediction(bool taken) {
+    read_saturating_counter(taken);
+    update_saturating_counter(taken);
   }
 
 } global;
@@ -295,10 +355,11 @@ void ac_behavior(end) {
   printf("******************************\n");
   printf("Number of Instructions: %d\n", global.number_of_instructions);
   printf("Number of data hazards: %d\n", global.number_of_hazards);
-  printf("Static wrong predictions: %d\n", global.static_wrong_predictions);
+  printf("Total number of branches: %d\n", global.total_number_of_branches);
+  printf("Wrong branch predictions (static): %d\n", global.static_wrong_predictions);
+  printf("Wrong branch predictions (saturating): %d\n", global.saturating_wrong_predictions);
   printf("******************************\n");
 }
-
 
 //!Instruction lb behavior method.
 void ac_behavior( lb ) {
@@ -923,6 +984,19 @@ void ac_behavior( instr_break ) {
   fprintf(stderr, "instr_break behavior not implemented.\n");
   exit(EXIT_FAILURE);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
