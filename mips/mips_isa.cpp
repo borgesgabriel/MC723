@@ -227,10 +227,8 @@ struct variables {
 
   void update_saturating_counter(bool taken, int& stage) {
     stage += 2 * int(taken) - 1; // Adds 1 if taken, -1 otherwise
-    stage = std::min(stage, 3);
-    stage = std::max(stage, 0);
     // 0 <= stage < 2 * numberOfStages
-    // stage = std::min(std::max(stage, 2 * kNumberOfStages - 1), 0);
+    stage = std::max(std::min(stage, 2 * kNumberOfStages - 1), 0);
   }
 
   void saturating_branch_prediction(bool taken) {
@@ -238,6 +236,11 @@ struct variables {
     update_saturating_counter(taken, saturating_stage);
   }
 
+ /*
+  * Two_level_history contains the history of the last 'kHistoryDepth' actual
+  * branch decisions. This method updates that history, adding 'taken' and
+  * removing the oldest entry recorded on the history.
+  */
   void update_two_level_history(bool taken) {
     two_level_history = (two_level_history << 1 | taken) & ((1 << kHistoryDepth) - 1);
   }
