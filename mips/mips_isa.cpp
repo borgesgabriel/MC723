@@ -62,45 +62,45 @@ struct mips_instruction {
 
 std::ostream& operator<<(std::ostream& os, const mips_instruction& inst) {
   switch (inst.type) {
-  case mips_instruction::kR:
-    os << "R-instruction: " <<
-      inst.op << " " <<
-      inst.rs << ", " <<
-      inst.rt << ", " <<
-      inst.rd << ", " <<
-      inst.shamt << ", " <<
-      inst.func;
-    break;
-  case mips_instruction::kI:
-    os << "I-instruction: " <<
-      inst.op << " " <<
-      inst.rs << ", " <<
-      inst.rt << ", " <<
-      inst.imm;
-    break;
-  case mips_instruction::kJ:
-    os << "J-instruction: " <<
-      inst.op << " " <<
-      inst.addr;
-    break;
-  default:
-    os << "Invalid instruction!";
-    break;
+    case mips_instruction::kR:
+      os << "R-instruction: " <<
+        inst.op << " " <<
+        inst.rs << ", " <<
+        inst.rt << ", " <<
+        inst.rd << ", " <<
+        inst.shamt << ", " <<
+        inst.func;
+      break;
+    case mips_instruction::kI:
+      os << "I-instruction: " <<
+        inst.op << " " <<
+        inst.rs << ", " <<
+        inst.rt << ", " <<
+        inst.imm;
+      break;
+    case mips_instruction::kJ:
+      os << "J-instruction: " <<
+        inst.op << " " <<
+        inst.addr;
+      break;
+    default:
+      os << "Invalid instruction!";
+      break;
   }
   return os;
 }
 
 struct variables {
-  int number_of_instructions;
-  int number_of_hazards;
+  unsigned int number_of_instructions;
+  unsigned int number_of_hazards;
   int pc_addr;
   int static_wrong_predictions;
   int saturating_wrong_predictions;
   int two_level_wrong_predictions;
   int total_number_of_branches;
-  int two_stage_history;
+  int two_level_history;
   int saturating_stage;
-  vector<int> two_level_stages;
+  std::vector<int> two_level_stages;
   static constexpr int kNumberOfStoredInstructions = 10;
   static constexpr int kNumberOfStages = 2; // The total number of stages is twice that (taken + not taken)
   static constexpr int kHistoryDepth = 2;
@@ -120,14 +120,14 @@ struct variables {
     static_wrong_predictions(0),
     saturating_wrong_predictions(0),
     total_number_of_branches(0),
-    two_stage_history(0),
+    two_level_history(0),
     saturating_stage(kNumberOfStages) {
-    // kNumberOfStages is the first 'taken' value, as the stage range
-    // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
-    two_level_stages.resize(1 << kHistoryDepth, kNumberOfStages);
-    last_write.resize(34);
-    hazard_table = { { 2, 1, 1 }, { 1, 1, 1 } };
-  }
+      // kNumberOfStages is the first 'taken' value, as the stage range
+      // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
+      two_level_stages.resize(1 << kHistoryDepth, (int) kNumberOfStages);
+      last_write.resize(34);
+      hazard_table = { { 2, 1, 1 }, { 1, 1, 1 } };
+    }
 
   void push(mips_instruction inst) {
     read_hazard(inst);
@@ -137,8 +137,9 @@ struct variables {
     if (taken--) {
       static_branch_prediction(taken, inst);
       saturating_branch_prediction(taken);
+      two_level_branch_predictor(taken);
     }
-    std::cout << inst << std::endl;
+    // std::cout << inst << std::endl;
     latest_instructions.push_front(inst);
     if (latest_instructions.size() > kNumberOfStoredInstructions) {
       latest_instructions.pop_back();
@@ -187,30 +188,30 @@ struct variables {
   }
 
   /**
-  * Returns 0 if 'inst' isn't a branch instruction, 1 if it is but branch
-  * is not taken, 2 if it is and branch is taken.
-  */
+   * Returns 0 if 'inst' isn't a branch instruction, 1 if it is but branch
+   * is not taken, 2 if it is and branch is taken.
+   */
   int actual_branch_taken(mips_instruction inst) {
     int taken = 0;
     if (inst.type == mips_instruction::kI && branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
       ++taken;
       total_number_of_branches++;
       switch (inst.op) {
-      case 0x01:
-        taken += inst.rt ? inst.rs >= 0 : inst.rs < 0;
-        break;
-      case 0x04:
-        taken += inst.rs == inst.rt;
-        break;
-      case 0x05:
-        taken += inst.rs != inst.rt;
-        break;
-      case 0x06:
-        taken += inst.rs <= 0;
-        break;
-      case 0x07:
-        taken += inst.rs > 0;
-        break;
+        case 0x01:
+          taken += inst.rt ? inst.rs >= 0 : inst.rs < 0;
+          break;
+        case 0x04:
+          taken += inst.rs == inst.rt;
+          break;
+        case 0x05:
+          taken += inst.rs != inst.rt;
+          break;
+        case 0x06:
+          taken += inst.rs <= 0;
+          break;
+        case 0x07:
+          taken += inst.rs > 0;
+          break;
       }
     }
     return taken;
@@ -226,8 +227,10 @@ struct variables {
 
   void update_saturating_counter(bool taken, int& stage) {
     stage += 2 * int(taken) - 1; // Adds 1 if taken, -1 otherwise
+    stage = std::min(stage, 3);
+    stage = std::max(stage, 0);
     // 0 <= stage < 2 * numberOfStages
-    stage = std::min(std::max(stage, 2 * kNumberOfStages - 1), 0);
+    // stage = std::min(std::max(stage, 2 * kNumberOfStages - 1), 0);
   }
 
   void saturating_branch_prediction(bool taken) {
@@ -248,7 +251,7 @@ struct variables {
 } global;
 
 const std::set<std::pair<int, int>> variables::instructions_dont_write{
-    { 0, 0x8 },  // jr
+  { 0, 0x8 },  // jr
     { 0, 0x0C }, // syscall
     { 0, 0x0D }, // break
     { 0x04, 0 }, // beq
@@ -260,16 +263,16 @@ const std::set<std::pair<int, int>> variables::instructions_dont_write{
     { 0x29, 0 }, // sh
     { 0x2B, 0 }, // sw
     { 0x39, 0 }  // swc1
-    // bltzal, bgezal
+  // bltzal, bgezal
 };
 
 const std::set<std::pair<int, int>> variables::branch_instructions{
-    { 0x04, 0 }, // beq
+  { 0x04, 0 }, // beq
     { 0x05, 0 }, // bne
     { 0x06, 0 }, // blez
     { 0x07, 0 }, // bgtz
     { 0x01, 0 }  // bltz, bgez
-    // bltzal, bgezal
+  // bltzal, bgezal
 };
 
 // *****************************************************
@@ -291,44 +294,44 @@ void ac_behavior(instruction) {
 //! Instruction Format behavior methods.
 void ac_behavior(Type_R) {
   global.push({
-    mips_instruction::kR,
-    op,
-    rs,
-    rt,
-    rd,
-    shamt,
-    func,
-    0,
-    0
-  });
+      mips_instruction::kR,
+      op,
+      rs,
+      rt,
+      rd,
+      shamt,
+      func,
+      0,
+      0
+      });
 }
 
 void ac_behavior(Type_I) {
   global.push({
-    mips_instruction::kI,
-    op,
-    rs,
-    rt,
-    0,
-    0,
-    0,
-    0,
-    imm
-  });
+      mips_instruction::kI,
+      op,
+      rs,
+      rt,
+      0,
+      0,
+      0,
+      0,
+      imm
+      });
 }
 
 void ac_behavior(Type_J) {
   global.push({
-    mips_instruction::kJ,
-    op,
-    0,
-    0,
-    0,
-    0,
-    0,
-    addr,
-    0
-  });
+      mips_instruction::kJ,
+      op,
+      0,
+      0,
+      0,
+      0,
+      0,
+      addr,
+      0
+      });
 }
 
 //!Behavior called before starting simulation
@@ -533,7 +536,7 @@ void ac_behavior(addi) {
   dbg_printf("Result = %#x\n", RB[rt]);
   //Test overflow
   if (((RB[rs] & 0x80000000) == (imm & 0x80000000)) &&
-    ((imm & 0x80000000) != (RB[rt] & 0x80000000))) {
+      ((imm & 0x80000000) != (RB[rt] & 0x80000000))) {
     fprintf(stderr, "EXCEPTION(addi): integer overflow.\n");
     exit(EXIT_FAILURE);
   }
@@ -608,7 +611,7 @@ void ac_behavior(add) {
   dbg_printf("Result = %#x\n", RB[rd]);
   //Test overflow
   if (((RB[rs] & 0x80000000) == (RB[rd] & 0x80000000)) &&
-    ((RB[rd] & 0x80000000) != (RB[rt] & 0x80000000))) {
+      ((RB[rd] & 0x80000000) != (RB[rt] & 0x80000000))) {
     fprintf(stderr, "EXCEPTION(add): integer overflow.\n");
     exit(EXIT_FAILURE);
   }
