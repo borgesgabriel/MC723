@@ -27,6 +27,7 @@
 #include <deque>
 #include <set>
 #include <vector>
+#include <algorithm>
 
 //If you want debug information for this model, uncomment next line
 // #define DEBUG_MODEL
@@ -95,11 +96,16 @@ struct variables {
   int pc_addr;
   int static_wrong_predictions;
   int saturating_wrong_predictions;
+  int two_level_wrong_predictions;
   int total_number_of_branches;
+  int two_stage_history;
+  int saturating_stage;
+  vector<int> two_level_stages;
   static constexpr int kNumberOfStoredInstructions = 10;
+  static constexpr int kNumberOfStages = 2; // The total number of stages is twice that (taken + not taken)
+  static constexpr int kHistoryDepth = 2;
   static constexpr bool is_forwarding = false;
   enum pipeline_stages { k5, k7, k13, SIZE };
-  enum saturating_stages { kStronglyNotTaken, kWeaklyNotTaken, kWeaklyTaken, kStronglyTaken } saturating_stage;
   pipeline_stages pipeline_stage = k5;
   std::deque<mips_instruction> latest_instructions;
   const static std::set<std::pair<int, int>> instructions_dont_write;
@@ -114,7 +120,11 @@ struct variables {
     static_wrong_predictions(0),
     saturating_wrong_predictions(0),
     total_number_of_branches(0),
-    saturating_stage(kWeaklyTaken) {
+    two_stage_history(0),
+    saturating_stage(kNumberOfStages) {
+    // kNumberOfStages is the first 'taken' value, as the stage range
+    // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
+    two_level_stages.resize(1 << kHistoryDepth, kNumberOfStages);
     last_write.resize(34);
     hazard_table = { { 2, 1, 1 }, { 1, 1, 1 } };
   }
@@ -123,6 +133,7 @@ struct variables {
     read_hazard(inst);
     write_hazard(inst);
     int taken = actual_branch_taken(inst);
+    // Verifies that 'inst' is a branch instruction and maps 'taken' into a bool
     if (taken--) {
       static_branch_prediction(taken, inst);
       saturating_branch_prediction(taken);
@@ -141,17 +152,13 @@ struct variables {
     // mult, multu, div, divu
     if (inst.func == 0x18 || inst.func == 0x19 || inst.func == 0x1A || inst.func == 0x1B) {
       last_write[32] = last_write[33] = number_of_instructions;
-    }
-    else if (inst.func == 0x11) { // mthi
+    } else if (inst.func == 0x11) { // mthi
       last_write[32] = number_of_instructions;
-    }
-    else if (inst.func == 0x13) { // mtlo
+    } else if (inst.func == 0x13) { // mtlo
       last_write[33] = number_of_instructions;
-    }
-    else if (inst.type == mips_instruction::kR) { // R-type
+    } else if (inst.type == mips_instruction::kR) { // R-type
       last_write[inst.rd] = number_of_instructions;
-    }
-    else { // I-type
+    } else { // I-type
       last_write[inst.rt] = number_of_instructions;
     }
   }
@@ -160,20 +167,16 @@ struct variables {
     if (inst.type == mips_instruction::kR) {
       if (inst.rs != 0) {
         number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
-      }
-      else if (inst.rt != 0) {
+      } else if (inst.rt != 0) {
         number_of_hazards += isHazard(number_of_instructions - last_write[inst.rt]);
       }
-    }
-    else if (inst.type == mips_instruction::kI) {
+    } else if (inst.type == mips_instruction::kI) {
       if (inst.op == 0x0F) {
         return;
-      }
-      else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) {
+      } else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) {
         number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]) |
           isHazard(number_of_instructions - last_write[inst.rt]);
-      }
-      else if (inst.rs != 0) {
+      } else if (inst.rs != 0) {
         number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
       }
     }
@@ -183,6 +186,10 @@ struct variables {
     return hazard_table[is_forwarding][pipeline_stage] >= distance;
   }
 
+  /**
+  * Returns 0 if 'inst' isn't a branch instruction, 1 if it is but branch
+  * is not taken, 2 if it is and branch is taken.
+  */
   int actual_branch_taken(mips_instruction inst) {
     int taken = 0;
     if (inst.type == mips_instruction::kI && branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
@@ -213,46 +220,29 @@ struct variables {
     static_wrong_predictions += taken != inst.imm < pc_addr;
   }
 
-  void read_saturating_counter(bool taken) {
-    saturating_wrong_predictions += taken != (saturating_stage > kWeaklyNotTaken);
+  void read_saturating_counter(bool taken, int& wrong_predictions, int stage) {
+    wrong_predictions += taken != (stage >= kNumberOfStages);
   }
 
-  void update_saturating_counter(bool taken) {
-    if (taken) {
-      switch (saturating_stage) {
-      case kStronglyNotTaken:
-        saturating_stage = kWeaklyNotTaken;
-        break;
-      case kWeaklyNotTaken:
-        saturating_stage = kWeaklyTaken;
-        break;
-      case kWeaklyTaken:
-        saturating_stage = kStronglyTaken;
-        break;
-      default:
-        break;
-      }
-    }
-    else {
-      switch (saturating_stage) {
-      case kWeaklyNotTaken:
-        saturating_stage = kStronglyNotTaken;
-        break;
-      case kWeaklyTaken:
-        saturating_stage = kWeaklyNotTaken;
-        break;
-      case kStronglyTaken:
-        saturating_stage = kWeaklyTaken;
-        break;
-      default:
-        break;
-      }
-    }
+  void update_saturating_counter(bool taken, int& stage) {
+    stage += 2 * int(taken) - 1; // Adds 1 if taken, -1 otherwise
+    // 0 <= stage < 2 * numberOfStages
+    stage = std::min(std::max(stage, 2 * kNumberOfStages - 1), 0);
   }
 
   void saturating_branch_prediction(bool taken) {
-    read_saturating_counter(taken);
-    update_saturating_counter(taken);
+    read_saturating_counter(taken, saturating_wrong_predictions, saturating_stage);
+    update_saturating_counter(taken, saturating_stage);
+  }
+
+  void update_two_level_history(bool taken) {
+    two_level_history = (two_level_history << 1 | taken) & ((1 << kHistoryDepth) - 1);
+  }
+
+  void two_level_branch_predictor(bool taken) {
+    read_saturating_counter(taken, two_level_wrong_predictions, two_level_stages.at(two_level_history));
+    update_saturating_counter(taken, two_level_stages.at(two_level_history));
+    update_two_level_history(taken);
   }
 
 } global;
@@ -367,6 +357,7 @@ void ac_behavior(end) {
   printf("Total number of branches: %d\n", global.total_number_of_branches);
   printf("Wrong branch predictions (static): %d\n", global.static_wrong_predictions);
   printf("Wrong branch predictions (saturating): %d\n", global.saturating_wrong_predictions);
+  printf("Wrong branch predictions (two level): %d\n", global.two_level_wrong_predictions);
   printf("******************************\n");
 }
 
