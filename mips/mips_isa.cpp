@@ -27,6 +27,7 @@
 #include <deque>
 #include <set>
 #include <vector>
+#include <algorithm>
 
 //If you want debug information for this model, uncomment next line
 // #define DEBUG_MODEL
@@ -47,7 +48,7 @@ static int processors_started = 0;
 // *****************************************************
 
 struct mips_instruction {
-  enum i_type {kR, kI, kJ};
+  enum i_type { kR, kI, kJ };
   i_type type;
   unsigned int op;
   unsigned int rs;
@@ -63,24 +64,24 @@ std::ostream& operator<<(std::ostream& os, const mips_instruction& inst) {
   switch (inst.type) {
   case mips_instruction::kR:
     os << "R-instruction: " <<
-       inst.op << " " <<
-       inst.rs << ", " <<
-       inst.rt << ", " <<
-       inst.rd << ", " <<
-       inst.shamt << ", " <<
-       inst.func;
+       "op: " << inst.op << " " <<
+       "rs: " << inst.rs << ", " <<
+       "rt: " << inst.rt << ", " <<
+       "rd: " << inst.rd << ", " <<
+       "shamt: " << inst.shamt << ", " <<
+       "func: " << inst.func;
     break;
   case mips_instruction::kI:
     os << "I-instruction: " <<
-       inst.op << " " <<
-       inst.rs << ", " <<
-       inst.rt << ", " <<
-       inst.imm;
+       "op: " << inst.op << " " <<
+       "rs: " << inst.rs << ", " <<
+       "rt: " << inst.rt << ", " <<
+       "imm: " << inst.imm;
     break;
   case mips_instruction::kJ:
     os << "J-instruction: " <<
-       inst.op << " " <<
-       inst.addr;
+       "op: " << inst.op << " " <<
+       "addr: " << inst.addr;
     break;
   default:
     os << "Invalid instruction!";
@@ -90,24 +91,34 @@ std::ostream& operator<<(std::ostream& os, const mips_instruction& inst) {
 }
 
 struct variables {
-  int number_of_instructions;
-  int number_of_hazards;
-  int pc_addr;
+  unsigned int number_of_instructions; // Include NOP instructions
+  unsigned int number_of_nops;
+  int pc_addr; // Current pc value
   int static_wrong_predictions;
   int saturating_wrong_predictions;
-  int total_number_of_branches;
+  int two_level_wrong_predictions;
+  unsigned int total_number_of_branches;
+  int two_level_history;
+  int saturating_stage;
+  std::vector<int> two_level_stages;
   static constexpr int kNumberOfStoredInstructions = 10;
-  static constexpr bool is_forwarding = false;
-  enum pipeline_stages {k5, k7, k13, SIZE};
-  enum saturating_stages {kStronglyNotTaken, kWeaklyNotTaken, kWeaklyTaken, kStronglyTaken} saturating_stage;
-  pipeline_stages pipeline_stage = k5;
+  static constexpr int kNumberOfStages = 2; // The total number of stages is twice that (taken + not taken)
+  static constexpr int kHistoryDepth = 2;
+  static constexpr bool is_fowarding = true;
+  enum pipeline_stages { k5, k7, k13, SIZE };
+  // Wait for previous instruction to complete its data read/write
+  std::vector<unsigned int> number_of_data_hazards;
+  // Deciding on control action depends on previous instruction
+  std::vector<unsigned int> number_of_control_hazards;
   std::deque<mips_instruction> latest_instructions;
   const static std::set<std::pair<int, int>> instructions_dont_write;
   const static std::set<std::pair<int, int>> branch_instructions;
+  const static std::set<std::pair<int, int>> ld_instructions;
   std::vector<std::vector<int>> hazard_table;
 
   std::vector<int> last_write;
 
+<<<<<<< HEAD
   // superscalar
   struct _ss {
     bool ssLoaded = false;
@@ -129,34 +140,55 @@ struct variables {
       ss.ssLoaded = false;
   }
 
-  variables():
+  variables() :
     number_of_instructions(0),
-    number_of_hazards(0),
+    number_of_nops(0),
     static_wrong_predictions(0),
     saturating_wrong_predictions(0),
     total_number_of_branches(0),
-    saturating_stage(kWeaklyTaken) {
+    two_level_history(0),
+    saturating_stage(kNumberOfStages) {
+    // kNumberOfStages is the first 'taken' value, as the stage range
+    // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
+    two_level_stages.resize(1 << kHistoryDepth, (int) kNumberOfStages);
     last_write.resize(34);
-    hazard_table = {{2, 1, 1}, {1, 1, 1}};
+    number_of_data_hazards.resize(3, 0);
+    number_of_control_hazards.resize(3, 0);
+    // Processors
+    // 5 Stages -> MIPS R2000 -> branch misprediction penalty = 1 cycle
+    // 7 Stages -> MIPS R10000 -> branch misprediction penalty = 5 cycles
+    // 13 Stages -> ARM Cortex A8 -> branch misprediction penalty = 13 cycles
+    hazard_table = { {2, 1, 1}, {1, 2, 3} };
   }
 
   void push(mips_instruction inst) {
-    read_hazard(inst);
+    // Check for hazards
+    read_hazard(inst, k5);
+    read_hazard(inst, k7);
+    read_hazard(inst, k13);
     write_hazard(inst);
     int taken = actual_branch_taken(inst);
+    // Verifies that 'inst' is a branch instruction and maps 'taken' into a bool
     if (taken--) {
       static_branch_prediction(taken, inst);
       saturating_branch_prediction(taken);
+      two_level_branch_predictor(taken);
     }
-    std::cout << inst << std::endl;
+    // std::cout << inst << std::endl;
     latest_instructions.push_front(inst);
+    // Remove NOP from latest_instructions
+    if (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.rd == 0 && inst.func == 0 && inst.imm == 0) {
+      latest_instructions.pop_front();
+    }
     if (latest_instructions.size() > kNumberOfStoredInstructions) {
       latest_instructions.pop_back();
     }
   }
 
   void write_hazard(mips_instruction inst) {
-    if (inst.type == mips_instruction::kJ || instructions_dont_write.find(std::make_pair(inst.op, inst.func)) != instructions_dont_write.end()) {
+    if (inst.type == mips_instruction::kJ ||
+        instructions_dont_write.find(std::make_pair(inst.op, inst.func)) != instructions_dont_write.end() ||
+        (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.func == 0 && inst.imm == 0)) {
       return;
     }
     // mult, multu, div, divu
@@ -173,32 +205,97 @@ struct variables {
     }
   }
 
-  void read_hazard(mips_instruction inst) {
+  void read_hazard(mips_instruction inst, pipeline_stages pipeline_stage) {
+    bool load = false;
+    // NOP
+    if (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.rd == 0 && inst.func == 0 && inst.imm == 0) {
+      if (pipeline_stage == k5) {
+        number_of_nops++;
+      }
+      // Update time stamp to ignore any NOP inserted by the simulator
+      for (int i = 0; i < last_write.size(); i++) {
+        last_write[i]++;
+      }
+      return;
+    }
+    // Check if the last instruction was a load
+    if (latest_instructions.size() > 0 &&
+         ld_instructions.find(std::make_pair(latest_instructions[0].op, latest_instructions[0].func)) != ld_instructions.end()) {
+      // When we consider fowarding, the only possibility of hazard is in the instruction that comes right after a load
+      // std::cout << latest_instructions[0] << std::endl;
+      // std::cout << inst << std::endl;
+      load = true;
+    } else if (latest_instructions.size() > 1 && pipeline_stage != k5 &&
+         ld_instructions.find(std::make_pair(latest_instructions[1].op, latest_instructions[1].func)) != ld_instructions.end()) {
+      load = true;
+    } else if (latest_instructions.size() > 2 && pipeline_stage == k13 &&
+         ld_instructions.find(std::make_pair(latest_instructions[2].op, latest_instructions[2].func)) != ld_instructions.end()) {
+      load = true;
+    }
+    if (is_fowarding == true && load == false) { // The last instruction was not a load
+      // There are no hazards associated with R-type instructions when we consider fowarding
+      return;
+    }
     if (inst.type == mips_instruction::kR) {
-      if (inst.rs != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
+      if (inst.func == 0x0D || inst.func == 0x0C) { // break, syscall
+        return;
+      }
+      if (inst.func == 0x10) { // mfhi
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[32], pipeline_stage);
+      } else if (inst.func == 0x12) { // mflo
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[33], pipeline_stage);
+      } else if (inst.func == 0x11 || inst.func == 0x13) { // mthi, mtlo
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if (inst.func == 0x08 || inst.func == 0x09) { // jr, jalr
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if (inst.shamt != 0) { // sll, sra, srl
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (inst.rs != 0 && inst.rt != 0) {
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (inst.rs != 0) {
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
       } else if (inst.rt != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rt]);
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
       }
     } else if (inst.type == mips_instruction::kI) {
-      if (inst.op == 0x0F) {
+      if (inst.op == 0x0F) { // lui
         return;
-      } else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]) |
-                             isHazard(number_of_instructions - last_write[inst.rt]);
+      } else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) { // beq, bne
+        // A branch that depends on the result of the previous instruction is a control hazard
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
+        // A branch that depends on the result of the previous instruction is a control hazard
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && (inst.rs != 0 && inst.rt != 0)) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && inst.rs != 0) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && inst.rt != 0) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
       } else if (inst.rs != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
       }
     }
   }
 
-  int isHazard(int distance) {
-    return hazard_table[is_forwarding][pipeline_stage] >= distance;
+  int isHazard(int distance, pipeline_stages pipeline_stage) {
+    return hazard_table[is_fowarding][pipeline_stage] >= distance;
   }
 
+  /**
+   * Returns 0 if 'inst' isn't a branch instruction, 1 if it is but branch
+   * is not taken, 2 if it is and branch is taken.
+   **/
   int actual_branch_taken(mips_instruction inst) {
     int taken = 0;
-    if (inst.type == mips_instruction::kI && branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
+    if (inst.type == mips_instruction::kI &&
+        branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
       ++taken;
       total_number_of_branches++;
       switch (inst.op) {
@@ -226,83 +323,99 @@ struct variables {
     static_wrong_predictions += taken != inst.imm < pc_addr;
   }
 
-  void read_saturating_counter(bool taken) {
-    saturating_wrong_predictions += taken != (saturating_stage > kWeaklyNotTaken);
+  void read_saturating_counter(bool taken, int& wrong_predictions, int stage) {
+    wrong_predictions += taken != (stage >= kNumberOfStages);
   }
 
-  void update_saturating_counter(bool taken) {
-    if (taken) {
-      switch (saturating_stage) {
-      case kStronglyNotTaken:
-        saturating_stage = kWeaklyNotTaken;
-        break;
-      case kWeaklyNotTaken:
-        saturating_stage = kWeaklyTaken;
-        break;
-      case kWeaklyTaken:
-        saturating_stage = kStronglyTaken;
-        break;
-      default:
-        break;
-      }
-    } else {
-      switch (saturating_stage) {
-      case kWeaklyNotTaken:
-        saturating_stage = kStronglyNotTaken;
-        break;
-      case kWeaklyTaken:
-        saturating_stage = kWeaklyNotTaken;
-        break;
-      case kStronglyTaken:
-        saturating_stage = kWeaklyTaken;
-        break;
-      default:
-        break;
-      }
-    }
+  void update_saturating_counter(bool taken, int& stage) {
+    stage += 2 * int(taken) - 1; // Adds 1 if taken, -1 otherwise
+    // 0 <= stage < 2 * numberOfStages
+    stage = std::max(std::min(stage, 2 * kNumberOfStages - 1), 0);
   }
 
   void saturating_branch_prediction(bool taken) {
-    read_saturating_counter(taken);
-    update_saturating_counter(taken);
+    read_saturating_counter(taken, saturating_wrong_predictions, saturating_stage);
+    update_saturating_counter(taken, saturating_stage);
   }
+
+ /*
+  * Two_level_history contains the history of the last 'kHistoryDepth' actual
+  * branch decisions. This method updates that history, adding 'taken' and
+  * removing the oldest entry recorded on the history.
+  */
+  void update_two_level_history(bool taken) {
+    two_level_history = (two_level_history << 1 | taken) & ((1 << kHistoryDepth) - 1);
+  }
+
+  void two_level_branch_predictor(bool taken) {
+    read_saturating_counter(taken, two_level_wrong_predictions, two_level_stages.at(two_level_history));
+    update_saturating_counter(taken, two_level_stages.at(two_level_history));
+    update_two_level_history(taken);
+  }
+
+  // void generate read_and_write_log(mips instruction) {
+  //   FILE *f;
+  //   if (number_ofinstructions <= 1) {
+  //     f = fopen("read_write.txt", "w");
+  //   } else {
+  //     f = fopen("read_write.txt", "a");
+  //   }
+  //   if (!f) {
+  //     return;
+  //   }
+  //
+  //   if (ld_instructions.find(std::make_pair(inst.op, inst.func)) != ld_instructions.end()) {
+  //     fprintf(f, "r %d"); // w endereço tamanho
+  //   }
+  //
+  //   fclose(f);
+  // }
 
 } global;
 
 const std::set<std::pair<int, int>> variables::instructions_dont_write {
-  {0, 0x8},  // jr
-  {0, 0x0C}, // syscall
-  {0, 0x0D}, // break
-  {0x04, 0}, // beq
-  {0x05, 0}, // bne
-  {0x06, 0}, // blez
-  {0x07, 0}, // bgtz
-  {0x01, 0}, // bltz, bgez
-  {0x28, 0}, // sb
-  {0x29, 0}, // sh
-  {0x2B, 0}, // sw
-  {0x39, 0}  // swc1
+  { 0, 0x8 },  // jr
+  { 0, 0x0C }, // syscall
+  { 0, 0x0D }, // break
+  { 0x04, 0 }, // beq
+  { 0x05, 0 }, // bne
+  { 0x06, 0 }, // blez
+  { 0x07, 0 }, // bgtz
+  { 0x01, 0 }, // bltz, bgez
+  { 0x28, 0 }, // sb
+  { 0x29, 0 }, // sh
+  { 0x2B, 0 }, // sw
+  { 0x39, 0 }  // swc1
   // bltzal, bgezal
 };
 
 const std::set<std::pair<int, int>> variables::branch_instructions {
-  {0x04, 0}, // beq
-  {0x05, 0}, // bne
-  {0x06, 0}, // blez
-  {0x07, 0}, // bgtz
-  {0x01, 0}  // bltz, bgez
+  { 0x04, 0 }, // beq
+  { 0x05, 0 }, // bne
+  { 0x06, 0 }, // blez
+  { 0x07, 0 }, // bgtz
+  { 0x01, 0 }  // bltz, bgez
   // bltzal, bgezal
+};
+
+const std::set<std::pair<int, int>> variables::ld_instructions {
+  { 0x20, 0 }, // lb
+  { 0x24, 0 }, // lbu
+  { 0x21, 0 }, // lh
+  { 0x25, 0 }, // lhu
+  { 0x23, 0 }  // lw
+  // { 0x31, 0 }  // lwc1
 };
 
 // *****************************************************
 
 //!Generic instruction behavior method.
-void ac_behavior( instruction ) {
+void ac_behavior(instruction) {
 
   global.number_of_instructions++;
   global.pc_addr = npc;
 
-  dbg_printf("----- PC=%#x ----- %lld\n", (int) ac_pc, ac_instr_counter);
+  dbg_printf("----- PC=%#x ----- %lld\n", (int)ac_pc, ac_instr_counter);
   //  dbg_printf("----- PC=%#x NPC=%#x ----- %lld\n", (int) ac_pc, (int)npc, ac_instr_counter);
 #ifndef NO_NEED_PC_UPDATE
   ac_pc = npc;
@@ -311,8 +424,8 @@ void ac_behavior( instruction ) {
 };
 
 //! Instruction Format behavior methods.
-void ac_behavior( Type_R ) {
-  global.push( {
+void ac_behavior(Type_R) {
+  global.push({
     mips_instruction::kR,
     op,
     rs,
@@ -325,8 +438,8 @@ void ac_behavior( Type_R ) {
   });
 }
 
-void ac_behavior( Type_I ) {
-  global.push( {
+void ac_behavior(Type_I) {
+  global.push({
     mips_instruction::kI,
     op,
     rs,
@@ -339,8 +452,8 @@ void ac_behavior( Type_I ) {
   });
 }
 
-void ac_behavior( Type_J ) {
-  global.push( {
+void ac_behavior(Type_J) {
+  global.push({
     mips_instruction::kJ,
     op,
     0,
@@ -359,13 +472,13 @@ void ac_behavior(begin) {
   RB[0] = 0;
   npc = ac_pc + 4;
 
-  // Is is not required by the architecture, but makes debug really easier
-  for (int regNum = 0; regNum < 32; regNum ++)
+  // It is not required by the architecture, but makes debug really easier
+  for (int regNum = 0; regNum < 32; regNum++)
     RB[regNum] = 0;
   hi = 0;
   lo = 0;
 
-  RB[29] =  AC_RAM_END - 1024 - processors_started++ * DEFAULT_STACK_SIZE;
+  RB[29] = AC_RAM_END - 1024 - processors_started++ * DEFAULT_STACK_SIZE;
 }
 
 //!Behavior called after finishing simulation
@@ -373,18 +486,38 @@ void ac_behavior(end) {
   dbg_printf("@@@ end behavior @@@\n");
 
   printf("\n");
-  printf("******************************\n");
-  printf("Number of Instructions: %d\n", global.number_of_instructions);
-  printf("Number of data hazards: %d\n", global.number_of_hazards);
-  printf("Total number of branches: %d\n", global.total_number_of_branches);
-  printf("Wrong branch predictions (static): %d\n", global.static_wrong_predictions);
-  printf("Wrong branch predictions (saturating): %d\n", global.saturating_wrong_predictions);
+  printf("*******************************************************\n\n");
+  printf("Number of NOPS: %d\n", global.number_of_nops);
+  printf("Number of Instructions: %d\n\n", global.number_of_instructions);
+  printf("Number of data hazards    (5 stages):  %d\n", global.number_of_data_hazards[0]);
+  printf("Number of control hazards (5 stages):  %d\n", global.number_of_control_hazards[0]);
+  printf("Number of data hazards    (7 stages):  %d\n", global.number_of_data_hazards[1]);
+  printf("Number of control hazards (7 stages):  %d\n", global.number_of_control_hazards[1]);
+  printf("Number of data hazards    (13 stages): %d\n", global.number_of_data_hazards[2]);
+  printf("Number of control hazards (13 stages): %d\n\n", global.number_of_control_hazards[2]);
+  printf("Total number of branches:  %d\n\n", global.total_number_of_branches);
+  printf("Wrong branch predictions (static):     %d (%.2f \%)\n", global.static_wrong_predictions, ((float) global.static_wrong_predictions / global.total_number_of_branches) * 100);
+  printf("Wrong branch predictions (saturating): %d (%.2f \%)\n", global.saturating_wrong_predictions, ((float) global.saturating_wrong_predictions / global.total_number_of_branches) * 100);
+  printf("Wrong branch predictions (two level):  %d (%.2f \%)\n\n", global.two_level_wrong_predictions, ((float) global.two_level_wrong_predictions / global.total_number_of_branches) * 100);
+  // Processors
+  // 5 Stages -> MIPS R2000 -> branch misprediction penalty = 1 cycle
+  // 7 Stages -> MIPS R10000 -> branch misprediction penalty = 5 cycles
+  // 13 Stages -> ARM Cortex A8 -> branch misprediction penalty = 13 cycles
+  printf("Number of stall cycles (5 stages + static):      %d\n", global.static_wrong_predictions);
+  printf("Number of stall cycles (5 stages + saturating):  %d\n", global.saturating_wrong_predictions);
+  printf("Number of stall cycles (5 stages + two level):   %d\n", global.two_level_wrong_predictions);
+  printf("Number of stall cycles (7 stages + static):      %d\n", global.static_wrong_predictions * 5);
+  printf("Number of stall cycles (7 stages + saturating):  %d\n", global.saturating_wrong_predictions * 5);
+  printf("Number of stall cycles (7 stages + two level):   %d\n", global.two_level_wrong_predictions * 5);
+  printf("Number of stall cycles (13 stages + static):     %d\n", global.static_wrong_predictions * 13);
+  printf("Number of stall cycles (13 stages + saturating): %d\n", global.saturating_wrong_predictions * 13);
+  printf("Number of stall cycles (13 stages + two level):  %d\n", global.two_level_wrong_predictions * 13);
   printf("Superscaled instr count: %d\n", global.ss.ssInstCount);
-  printf("******************************\n");
+  printf("\n*******************************************************\n");
 }
 
 //!Instruction lb behavior method.
-void ac_behavior( lb ) {
+void ac_behavior(lb) {
   char byte;
   unsigned address, offset;
 
@@ -393,13 +526,13 @@ void ac_behavior( lb ) {
   address = RB[rs] + imm;
   offset = address & 3;
   byte = (DM.read(address & ~3) >> ((3 - offset) * 8)) & 0xFF;
-  RB[rt] = (ac_Sword)byte ;
+  RB[rt] = (ac_Sword)byte;
 
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction lbu behavior method.
-void ac_behavior( lbu ) {
+void ac_behavior(lbu) {
   unsigned char byte;
   unsigned address, offset;
 
@@ -413,7 +546,7 @@ void ac_behavior( lbu ) {
 };
 
 //!Instruction lh behavior method.
-void ac_behavior( lh ) {
+void ac_behavior(lh) {
   short int half;
   unsigned address, offset;
 
@@ -422,12 +555,12 @@ void ac_behavior( lh ) {
   offset = (address & 3) >> 1;
   half = (DM.read(address & ~3) >> (1 - offset) * 16) & 0xFFFF;
 
-  RB[rt] = (ac_Sword) half;
+  RB[rt] = (ac_Sword)half;
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction lhu behavior method.
-void ac_behavior( lhu ) {
+void ac_behavior(lhu) {
   unsigned short int  half;
   unsigned address, offset;
 
@@ -441,14 +574,14 @@ void ac_behavior( lhu ) {
 };
 
 //!Instruction lw behavior method.
-void ac_behavior( lw ) {
+void ac_behavior(lw) {
   dbg_printf("lw r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   RB[rt] = DM.read(RB[rs] + imm);
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction lwl behavior method.
-void ac_behavior( lwl ) {
+void ac_behavior(lwl) {
   dbg_printf("lwl r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   unsigned int addr, offset;
   ac_Uword data;
@@ -463,7 +596,7 @@ void ac_behavior( lwl ) {
 };
 
 //!Instruction lwr behavior method.
-void ac_behavior( lwr ) {
+void ac_behavior(lwr) {
   dbg_printf("lwr r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   unsigned int addr, offset;
   ac_Uword data;
@@ -478,7 +611,7 @@ void ac_behavior( lwr ) {
 };
 
 //!Instruction sb behavior method.
-void ac_behavior( sb ) {
+void ac_behavior(sb) {
   unsigned char byte;
   unsigned address, offset_ammount;
   ac_word data;
@@ -491,11 +624,11 @@ void ac_behavior( sb ) {
   data = DM.read(address & ~3) & ~(0xFF << offset_ammount) | (byte << offset_ammount);
   DM.write(address & ~3, data);
 
-  dbg_printf("Result = %#x\n", (int) byte);
+  dbg_printf("Result = %#x\n", (int)byte);
 };
 
 //!Instruction sh behavior method.
-void ac_behavior( sh ) {
+void ac_behavior(sh) {
   unsigned short int half;
   unsigned address, offset_ammount;
   ac_word data;
@@ -508,18 +641,18 @@ void ac_behavior( sh ) {
   data = DM.read(address & ~3) & ~(0xFFFF << offset_ammount) | (half << offset_ammount);
   DM.write(address & ~3, data);
 
-  dbg_printf("Result = %#x\n", (int) half);
+  dbg_printf("Result = %#x\n", (int)half);
 };
 
 //!Instruction sw behavior method.
-void ac_behavior( sw ) {
+void ac_behavior(sw) {
   dbg_printf("sw r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   DM.write(RB[rs] + imm, RB[rt]);
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction swl behavior method.
-void ac_behavior( swl ) {
+void ac_behavior(swl) {
   dbg_printf("swl r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   unsigned int addr, offset;
   ac_Uword data;
@@ -534,7 +667,7 @@ void ac_behavior( swl ) {
 };
 
 //!Instruction swr behavior method.
-void ac_behavior( swr ) {
+void ac_behavior(swr) {
   dbg_printf("swr r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   unsigned int addr, offset;
   ac_Uword data;
@@ -549,30 +682,30 @@ void ac_behavior( swr ) {
 };
 
 //!Instruction addi behavior method.
-void ac_behavior( addi ) {
+void ac_behavior(addi) {
   dbg_printf("addi r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
   RB[rt] = RB[rs] + imm;
   dbg_printf("Result = %#x\n", RB[rt]);
   //Test overflow
-  if ( ((RB[rs] & 0x80000000) == (imm & 0x80000000)) &&
-       ((imm & 0x80000000) != (RB[rt] & 0x80000000)) ) {
+  if (((RB[rs] & 0x80000000) == (imm & 0x80000000)) &&
+      ((imm & 0x80000000) != (RB[rt] & 0x80000000))) {
     fprintf(stderr, "EXCEPTION(addi): integer overflow.\n");
     exit(EXIT_FAILURE);
   }
 };
 
 //!Instruction addiu behavior method.
-void ac_behavior( addiu ) {
+void ac_behavior(addiu) {
   dbg_printf("addiu r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
   RB[rt] = RB[rs] + imm;
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction slti behavior method.
-void ac_behavior( slti ) {
+void ac_behavior(slti) {
   dbg_printf("slti r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
   // Set the RD if RS< IMM
-  if ( (ac_Sword) RB[rs] < (ac_Sword) imm )
+  if ((ac_Sword)RB[rs] < (ac_Sword)imm)
     RB[rt] = 1;
   // Else reset RD
   else
@@ -581,10 +714,10 @@ void ac_behavior( slti ) {
 };
 
 //!Instruction sltiu behavior method.
-void ac_behavior( sltiu ) {
+void ac_behavior(sltiu) {
   dbg_printf("sltiu r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
   // Set the RD if RS< IMM
-  if ( (ac_Uword) RB[rs] < (ac_Uword) imm )
+  if ((ac_Uword)RB[rs] < (ac_Uword)imm)
     RB[rt] = 1;
   // Else reset RD
   else
@@ -593,28 +726,28 @@ void ac_behavior( sltiu ) {
 };
 
 //!Instruction andi behavior method.
-void ac_behavior( andi ) {
+void ac_behavior(andi) {
   dbg_printf("andi r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
-  RB[rt] = RB[rs] & (imm & 0xFFFF) ;
+  RB[rt] = RB[rs] & (imm & 0xFFFF);
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction ori behavior method.
-void ac_behavior( ori ) {
+void ac_behavior(ori) {
   dbg_printf("ori r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
-  RB[rt] = RB[rs] | (imm & 0xFFFF) ;
+  RB[rt] = RB[rs] | (imm & 0xFFFF);
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction xori behavior method.
-void ac_behavior( xori ) {
+void ac_behavior(xori) {
   dbg_printf("xori r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
-  RB[rt] = RB[rs] ^ (imm & 0xFFFF) ;
+  RB[rt] = RB[rs] ^ (imm & 0xFFFF);
   dbg_printf("Result = %#x\n", RB[rt]);
 };
 
 //!Instruction lui behavior method.
-void ac_behavior( lui ) {
+void ac_behavior(lui) {
   dbg_printf("lui r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
   // Load a constant in the upper 16 bits of a register
   // To achieve the desired behaviour, the constant was shifted 16 bits left
@@ -624,20 +757,20 @@ void ac_behavior( lui ) {
 };
 
 //!Instruction add behavior method.
-void ac_behavior( add ) {
+void ac_behavior(add) {
   dbg_printf("add r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] + RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
   //Test overflow
-  if ( ((RB[rs] & 0x80000000) == (RB[rd] & 0x80000000)) &&
-       ((RB[rd] & 0x80000000) != (RB[rt] & 0x80000000)) ) {
+  if (((RB[rs] & 0x80000000) == (RB[rd] & 0x80000000)) &&
+      ((RB[rd] & 0x80000000) != (RB[rt] & 0x80000000))) {
     fprintf(stderr, "EXCEPTION(add): integer overflow.\n");
     exit(EXIT_FAILURE);
   }
 };
 
 //!Instruction addu behavior method.
-void ac_behavior( addu ) {
+void ac_behavior(addu) {
   dbg_printf("addu r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] + RB[rt];
   //cout << "  RS: " << (unsigned int)RB[rs] << " RT: " << (unsigned int)RB[rt] << endl;
@@ -646,7 +779,7 @@ void ac_behavior( addu ) {
 };
 
 //!Instruction sub behavior method.
-void ac_behavior( sub ) {
+void ac_behavior(sub) {
   dbg_printf("sub r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] - RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
@@ -654,17 +787,17 @@ void ac_behavior( sub ) {
 };
 
 //!Instruction subu behavior method.
-void ac_behavior( subu ) {
+void ac_behavior(subu) {
   dbg_printf("subu r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] - RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction slt behavior method.
-void ac_behavior( slt ) {
+void ac_behavior(slt) {
   dbg_printf("slt r%d, r%d, r%d\n", rd, rs, rt);
   // Set the RD if RS< RT
-  if ( (ac_Sword) RB[rs] < (ac_Sword) RB[rt] )
+  if ((ac_Sword)RB[rs] < (ac_Sword)RB[rt])
     RB[rd] = 1;
   // Else reset RD
   else
@@ -673,10 +806,10 @@ void ac_behavior( slt ) {
 };
 
 //!Instruction sltu behavior method.
-void ac_behavior( sltu ) {
+void ac_behavior(sltu) {
   dbg_printf("sltu r%d, r%d, r%d\n", rd, rs, rt);
   // Set the RD if RS < RT
-  if ( RB[rs] < RB[rt] )
+  if (RB[rs] < RB[rt])
     RB[rd] = 1;
   // Else reset RD
   else
@@ -685,28 +818,28 @@ void ac_behavior( sltu ) {
 };
 
 //!Instruction instr_and behavior method.
-void ac_behavior( instr_and ) {
+void ac_behavior(instr_and) {
   dbg_printf("instr_and r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] & RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction instr_or behavior method.
-void ac_behavior( instr_or ) {
+void ac_behavior(instr_or) {
   dbg_printf("instr_or r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] | RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction instr_xor behavior method.
-void ac_behavior( instr_xor ) {
+void ac_behavior(instr_xor) {
   dbg_printf("instr_xor r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = RB[rs] ^ RB[rt];
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction instr_nor behavior method.
-void ac_behavior( instr_nor ) {
+void ac_behavior(instr_nor) {
   dbg_printf("nor r%d, r%d, r%d\n", rd, rs, rt);
   RB[rd] = ~(RB[rs] | RB[rt]);
   dbg_printf("Result = %#x\n", RB[rd]);
@@ -719,56 +852,56 @@ void ac_behavior( instr_nor ) {
 //};
 
 //!Instruction sll behavior method.
-void ac_behavior( sll ) {
+void ac_behavior(sll) {
   dbg_printf("sll r%d, r%d, %d\n", rd, rs, shamt);
   RB[rd] = RB[rt] << shamt;
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction srl behavior method.
-void ac_behavior( srl ) {
+void ac_behavior(srl) {
   dbg_printf("srl r%d, r%d, %d\n", rd, rs, shamt);
   RB[rd] = RB[rt] >> shamt;
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction sra behavior method.
-void ac_behavior( sra ) {
+void ac_behavior(sra) {
   dbg_printf("sra r%d, r%d, %d\n", rd, rs, shamt);
-  RB[rd] = (ac_Sword) RB[rt] >> shamt;
+  RB[rd] = (ac_Sword)RB[rt] >> shamt;
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction sllv behavior method.
-void ac_behavior( sllv ) {
+void ac_behavior(sllv) {
   dbg_printf("sllv r%d, r%d, r%d\n", rd, rt, rs);
   RB[rd] = RB[rt] << (RB[rs] & 0x1F);
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction srlv behavior method.
-void ac_behavior( srlv ) {
+void ac_behavior(srlv) {
   dbg_printf("srlv r%d, r%d, r%d\n", rd, rt, rs);
   RB[rd] = RB[rt] >> (RB[rs] & 0x1F);
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction srav behavior method.
-void ac_behavior( srav ) {
+void ac_behavior(srav) {
   dbg_printf("srav r%d, r%d, r%d\n", rd, rt, rs);
-  RB[rd] = (ac_Sword) RB[rt] >> (RB[rs] & 0x1F);
+  RB[rd] = (ac_Sword)RB[rt] >> (RB[rs] & 0x1F);
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction mult behavior method.
-void ac_behavior( mult ) {
+void ac_behavior(mult) {
   dbg_printf("mult r%d, r%d\n", rs, rt);
 
   long long result;
   int half_result;
 
-  result = (ac_Sword) RB[rs];
-  result *= (ac_Sword) RB[rt];
+  result = (ac_Sword)RB[rs];
+  result *= (ac_Sword)RB[rt];
 
   half_result = (result & 0xFFFFFFFF);
   // Register LO receives 32 less significant bits
@@ -776,19 +909,19 @@ void ac_behavior( mult ) {
 
   half_result = ((result >> 32) & 0xFFFFFFFF);
   // Register HI receives 32 most significant bits
-  hi = half_result ;
+  hi = half_result;
 
   dbg_printf("Result = %#llx\n", result);
 };
 
 //!Instruction multu behavior method.
-void ac_behavior( multu ) {
+void ac_behavior(multu) {
   dbg_printf("multu r%d, r%d\n", rs, rt);
 
   unsigned long long result;
   unsigned int half_result;
 
-  result  = RB[rs];
+  result = RB[rs];
   result *= RB[rt];
 
   half_result = (result & 0xFFFFFFFF);
@@ -797,22 +930,22 @@ void ac_behavior( multu ) {
 
   half_result = ((result >> 32) & 0xFFFFFFFF);
   // Register HI receives 32 most significant bits
-  hi = half_result ;
+  hi = half_result;
 
   dbg_printf("Result = %#llx\n", result);
 };
 
 //!Instruction div behavior method.
-void ac_behavior( div ) {
+void ac_behavior(div) {
   dbg_printf("div r%d, r%d\n", rs, rt);
   // Register LO receives quotient
-  lo = (ac_Sword) RB[rs] / (ac_Sword) RB[rt];
+  lo = (ac_Sword)RB[rs] / (ac_Sword)RB[rt];
   // Register HI receives remainder
-  hi = (ac_Sword) RB[rs] % (ac_Sword) RB[rt];
+  hi = (ac_Sword)RB[rs] % (ac_Sword)RB[rt];
 };
 
 //!Instruction divu behavior method.
-void ac_behavior( divu ) {
+void ac_behavior(divu) {
   dbg_printf("divu r%d, r%d\n", rs, rt);
   // Register LO receives quotient
   lo = RB[rs] / RB[rt];
@@ -821,45 +954,45 @@ void ac_behavior( divu ) {
 };
 
 //!Instruction mfhi behavior method.
-void ac_behavior( mfhi ) {
+void ac_behavior(mfhi) {
   dbg_printf("mfhi r%d\n", rd);
   RB[rd] = hi;
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction mthi behavior method.
-void ac_behavior( mthi ) {
+void ac_behavior(mthi) {
   dbg_printf("mthi r%d\n", rs);
   hi = RB[rs];
-  dbg_printf("Result = %#x\n", (unsigned int) hi);
+  dbg_printf("Result = %#x\n", (unsigned int)hi);
 };
 
 //!Instruction mflo behavior method.
-void ac_behavior( mflo ) {
+void ac_behavior(mflo) {
   dbg_printf("mflo r%d\n", rd);
   RB[rd] = lo;
   dbg_printf("Result = %#x\n", RB[rd]);
 };
 
 //!Instruction mtlo behavior method.
-void ac_behavior( mtlo ) {
+void ac_behavior(mtlo) {
   dbg_printf("mtlo r%d\n", rs);
   lo = RB[rs];
-  dbg_printf("Result = %#x\n", (unsigned int) lo);
+  dbg_printf("Result = %#x\n", (unsigned int)lo);
 };
 
 //!Instruction j behavior method.
-void ac_behavior( j ) {
+void ac_behavior(j) {
   dbg_printf("j %d\n", addr);
   addr = addr << 2;
 #ifndef NO_NEED_PC_UPDATE
-  npc =  (ac_pc & 0xF0000000) | addr;
+  npc = (ac_pc & 0xF0000000) | addr;
 #endif
-  dbg_printf("Target = %#x\n", (ac_pc & 0xF0000000) | addr );
+  dbg_printf("Target = %#x\n", (ac_pc & 0xF0000000) | addr);
 };
 
 //!Instruction jal behavior method.
-void ac_behavior( jal ) {
+void ac_behavior(jal) {
   dbg_printf("jal %d\n", addr);
   // Save the value of PC + 8 (return address) in $ra ($31) and
   // jump to the address given by PC(31...28)||(addr<<2)
@@ -871,12 +1004,12 @@ void ac_behavior( jal ) {
   npc = (ac_pc & 0xF0000000) | addr;
 #endif
 
-  dbg_printf("Target = %#x\n", (ac_pc & 0xF0000000) | addr );
+  dbg_printf("Target = %#x\n", (ac_pc & 0xF0000000) | addr);
   dbg_printf("Return = %#x\n", ac_pc + 4);
 };
 
 //!Instruction jr behavior method.
-void ac_behavior( jr ) {
+void ac_behavior(jr) {
   dbg_printf("jr r%d\n", rs);
   // Jump to the address stored on the register reg[RS]
   // It must also flush the instructions that were loaded into the pipeline
@@ -887,7 +1020,7 @@ void ac_behavior( jr ) {
 };
 
 //!Instruction jalr behavior method.
-void ac_behavior( jalr ) {
+void ac_behavior(jalr) {
   dbg_printf("jalr r%d, r%d\n", rd, rs);
   // Save the value of PC + 8(return address) in rd and
   // jump to the address given by [rs]
@@ -897,16 +1030,16 @@ void ac_behavior( jalr ) {
 #endif
   dbg_printf("Target = %#x\n", RB[rs]);
 
-  if ( rd == 0 ) //If rd is not defined use default
+  if (rd == 0) //If rd is not defined use default
     rd = Ra;
   RB[rd] = ac_pc + 4;
   dbg_printf("Return = %#x\n", ac_pc + 4);
 };
 
 //!Instruction beq behavior method.
-void ac_behavior( beq ) {
+void ac_behavior(beq) {
   dbg_printf("beq r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
-  if ( RB[rs] == RB[rt] ) {
+  if (RB[rs] == RB[rt]) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -915,9 +1048,9 @@ void ac_behavior( beq ) {
 };
 
 //!Instruction bne behavior method.
-void ac_behavior( bne ) {
+void ac_behavior(bne) {
   dbg_printf("bne r%d, r%d, %d\n", rt, rs, imm & 0xFFFF);
-  if ( RB[rs] != RB[rt] ) {
+  if (RB[rs] != RB[rt]) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -926,9 +1059,9 @@ void ac_behavior( bne ) {
 };
 
 //!Instruction blez behavior method.
-void ac_behavior( blez ) {
+void ac_behavior(blez) {
   dbg_printf("blez r%d, %d\n", rs, imm & 0xFFFF);
-  if ( (RB[rs] == 0 ) || (RB[rs] & 0x80000000 ) ) {
+  if ((RB[rs] == 0) || (RB[rs] & 0x80000000)) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2), 1;
 #endif
@@ -937,9 +1070,9 @@ void ac_behavior( blez ) {
 };
 
 //!Instruction bgtz behavior method.
-void ac_behavior( bgtz ) {
+void ac_behavior(bgtz) {
   dbg_printf("bgtz r%d, %d\n", rs, imm & 0xFFFF);
-  if ( !(RB[rs] & 0x80000000) && (RB[rs] != 0) ) {
+  if (!(RB[rs] & 0x80000000) && (RB[rs] != 0)) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -948,9 +1081,9 @@ void ac_behavior( bgtz ) {
 };
 
 //!Instruction bltz behavior method.
-void ac_behavior( bltz ) {
+void ac_behavior(bltz) {
   dbg_printf("bltz r%d, %d\n", rs, imm & 0xFFFF);
-  if ( RB[rs] & 0x80000000 ) {
+  if (RB[rs] & 0x80000000) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -959,9 +1092,9 @@ void ac_behavior( bltz ) {
 };
 
 //!Instruction bgez behavior method.
-void ac_behavior( bgez ) {
+void ac_behavior(bgez) {
   dbg_printf("bgez r%d, %d\n", rs, imm & 0xFFFF);
-  if ( !(RB[rs] & 0x80000000) ) {
+  if (!(RB[rs] & 0x80000000)) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -970,10 +1103,10 @@ void ac_behavior( bgez ) {
 };
 
 //!Instruction bltzal behavior method.
-void ac_behavior( bltzal ) {
+void ac_behavior(bltzal) {
   dbg_printf("bltzal r%d, %d\n", rs, imm & 0xFFFF);
   RB[Ra] = ac_pc + 4; //ac_pc is pc+4, we need pc+8
-  if ( RB[rs] & 0x80000000 ) {
+  if (RB[rs] & 0x80000000) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -983,10 +1116,10 @@ void ac_behavior( bltzal ) {
 };
 
 //!Instruction bgezal behavior method.
-void ac_behavior( bgezal ) {
+void ac_behavior(bgezal) {
   dbg_printf("bgezal r%d, %d\n", rs, imm & 0xFFFF);
   RB[Ra] = ac_pc + 4; //ac_pc is pc+4, we need pc+8
-  if ( !(RB[rs] & 0x80000000) ) {
+  if (!(RB[rs] & 0x80000000)) {
 #ifndef NO_NEED_PC_UPDATE
     npc = ac_pc + (imm << 2);
 #endif
@@ -996,57 +1129,14 @@ void ac_behavior( bgezal ) {
 };
 
 //!Instruction sys_call behavior method.
-void ac_behavior( sys_call ) {
+void ac_behavior(sys_call) {
   dbg_printf("syscall\n");
   stop();
 }
 
 //!Instruction instr_break behavior method.
-void ac_behavior( instr_break ) {
+void ac_behavior(instr_break) {
   fprintf(stderr, "instr_break behavior not implemented.\n");
   exit(EXIT_FAILURE);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
