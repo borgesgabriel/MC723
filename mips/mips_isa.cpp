@@ -62,75 +62,88 @@ struct mips_instruction {
 
 std::ostream& operator<<(std::ostream& os, const mips_instruction& inst) {
   switch (inst.type) {
-    case mips_instruction::kR:
-      os << "R-instruction: " <<
-        inst.op << " " <<
-        inst.rs << ", " <<
-        inst.rt << ", " <<
-        inst.rd << ", " <<
-        inst.shamt << ", " <<
-        inst.func;
-      break;
-    case mips_instruction::kI:
-      os << "I-instruction: " <<
-        inst.op << " " <<
-        inst.rs << ", " <<
-        inst.rt << ", " <<
-        inst.imm;
-      break;
-    case mips_instruction::kJ:
-      os << "J-instruction: " <<
-        inst.op << " " <<
-        inst.addr;
-      break;
-    default:
-      os << "Invalid instruction!";
-      break;
+  case mips_instruction::kR:
+    os << "R-instruction: " <<
+       "op: " << inst.op << " " <<
+       "rs: " << inst.rs << ", " <<
+       "rt: " << inst.rt << ", " <<
+       "rd: " << inst.rd << ", " <<
+       "shamt: " << inst.shamt << ", " <<
+       "func: " << inst.func;
+    break;
+  case mips_instruction::kI:
+    os << "I-instruction: " <<
+       "op: " << inst.op << " " <<
+       "rs: " << inst.rs << ", " <<
+       "rt: " << inst.rt << ", " <<
+       "imm: " << inst.imm;
+    break;
+  case mips_instruction::kJ:
+    os << "J-instruction: " <<
+       "op: " << inst.op << " " <<
+       "addr: " << inst.addr;
+    break;
+  default:
+    os << "Invalid instruction!";
+    break;
   }
   return os;
 }
 
 struct variables {
-  unsigned int number_of_instructions;
-  unsigned int number_of_hazards;
-  int pc_addr;
+  unsigned int number_of_instructions; // Include NOP instructions
+  unsigned int number_of_nops;
+  int pc_addr; // Current pc value
   int static_wrong_predictions;
   int saturating_wrong_predictions;
   int two_level_wrong_predictions;
-  int total_number_of_branches;
+  unsigned int total_number_of_branches;
   int two_level_history;
   int saturating_stage;
   std::vector<int> two_level_stages;
   static constexpr int kNumberOfStoredInstructions = 10;
   static constexpr int kNumberOfStages = 2; // The total number of stages is twice that (taken + not taken)
   static constexpr int kHistoryDepth = 2;
-  static constexpr bool is_forwarding = false;
+  static constexpr bool is_fowarding = true;
   enum pipeline_stages { k5, k7, k13, SIZE };
-  pipeline_stages pipeline_stage = k5;
+  // Wait for previous instruction to complete its data read/write
+  std::vector<unsigned int> number_of_data_hazards;
+  // Deciding on control action depends on previous instruction
+  std::vector<unsigned int> number_of_control_hazards;
   std::deque<mips_instruction> latest_instructions;
   const static std::set<std::pair<int, int>> instructions_dont_write;
   const static std::set<std::pair<int, int>> branch_instructions;
+  const static std::set<std::pair<int, int>> ld_instructions;
   std::vector<std::vector<int>> hazard_table;
 
   std::vector<int> last_write;
 
   variables() :
     number_of_instructions(0),
-    number_of_hazards(0),
+    number_of_nops(0),
     static_wrong_predictions(0),
     saturating_wrong_predictions(0),
     total_number_of_branches(0),
     two_level_history(0),
     saturating_stage(kNumberOfStages) {
-      // kNumberOfStages is the first 'taken' value, as the stage range
-      // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
-      two_level_stages.resize(1 << kHistoryDepth, (int) kNumberOfStages);
-      last_write.resize(34);
-      hazard_table = { { 2, 1, 1 }, { 1, 1, 1 } };
-    }
+    // kNumberOfStages is the first 'taken' value, as the stage range
+    // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
+    two_level_stages.resize(1 << kHistoryDepth, (int) kNumberOfStages);
+    last_write.resize(34);
+    number_of_data_hazards.resize(3, 0);
+    number_of_control_hazards.resize(3, 0);
+    // Processors
+    // 5 Stages -> MIPS R2000 -> branch misprediction penalty = 1 cycle
+    // 7 Stages -> MIPS R10000 -> branch misprediction penalty = 5 cycles
+    // 13 Stages -> ARM Cortex A8 -> branch misprediction penalty = 13 cycles
+    hazard_table = { {2, 1, 1}, {1, 2, 3} };
+  }
 
   void push(mips_instruction inst) {
-    read_hazard(inst);
+    // Check for hazards
+    read_hazard(inst, k5);
+    read_hazard(inst, k7);
+    read_hazard(inst, k13);
     write_hazard(inst);
     int taken = actual_branch_taken(inst);
     // Verifies that 'inst' is a branch instruction and maps 'taken' into a bool
@@ -141,13 +154,19 @@ struct variables {
     }
     // std::cout << inst << std::endl;
     latest_instructions.push_front(inst);
+    // Remove NOP from latest_instructions
+    if (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.rd == 0 && inst.func == 0 && inst.imm == 0) {
+      latest_instructions.pop_front();
+    }
     if (latest_instructions.size() > kNumberOfStoredInstructions) {
       latest_instructions.pop_back();
     }
   }
 
   void write_hazard(mips_instruction inst) {
-    if (inst.type == mips_instruction::kJ || instructions_dont_write.find(std::make_pair(inst.op, inst.func)) != instructions_dont_write.end()) {
+    if (inst.type == mips_instruction::kJ ||
+        instructions_dont_write.find(std::make_pair(inst.op, inst.func)) != instructions_dont_write.end() ||
+        (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.func == 0 && inst.imm == 0)) {
       return;
     }
     // mult, multu, div, divu
@@ -164,54 +183,115 @@ struct variables {
     }
   }
 
-  void read_hazard(mips_instruction inst) {
+  void read_hazard(mips_instruction inst, pipeline_stages pipeline_stage) {
+    bool load = false;
+    // NOP
+    if (inst.op == 0 && inst.rs == 0 && inst.rt == 0 && inst.rd == 0 && inst.func == 0 && inst.imm == 0) {
+      if (pipeline_stage == k5) {
+        number_of_nops++;
+      }
+      // Update time stamp to ignore any NOP inserted by the simulator
+      for (int i = 0; i < last_write.size(); i++) {
+        last_write[i]++;
+      }
+      return;
+    }
+    // Check if the last instruction was a load
+    if (latest_instructions.size() > 0 &&
+         ld_instructions.find(std::make_pair(latest_instructions[0].op, latest_instructions[0].func)) != ld_instructions.end()) {
+      // When we consider fowarding, the only possibility of hazard is in the instruction that comes right after a load
+      // std::cout << latest_instructions[0] << std::endl;
+      // std::cout << inst << std::endl;
+      load = true;
+    } else if (latest_instructions.size() > 1 && pipeline_stage != k5 &&
+         ld_instructions.find(std::make_pair(latest_instructions[1].op, latest_instructions[1].func)) != ld_instructions.end()) {
+      load = true;
+    } else if (latest_instructions.size() > 2 && pipeline_stage == k13 &&
+         ld_instructions.find(std::make_pair(latest_instructions[2].op, latest_instructions[2].func)) != ld_instructions.end()) {
+      load = true;
+    }
+    if (is_fowarding == true && load == false) { // The last instruction was not a load
+      // There are no hazards associated with R-type instructions when we consider fowarding
+      return;
+    }
     if (inst.type == mips_instruction::kR) {
-      if (inst.rs != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
+      if (inst.func == 0x0D || inst.func == 0x0C) { // break, syscall
+        return;
+      }
+      if (inst.func == 0x10) { // mfhi
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[32], pipeline_stage);
+      } else if (inst.func == 0x12) { // mflo
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[33], pipeline_stage);
+      } else if (inst.func == 0x11 || inst.func == 0x13) { // mthi, mtlo
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if (inst.func == 0x08 || inst.func == 0x09) { // jr, jalr
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if (inst.shamt != 0) { // sll, sra, srl
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (inst.rs != 0 && inst.rt != 0) {
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (inst.rs != 0) {
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
       } else if (inst.rt != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rt]);
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
       }
     } else if (inst.type == mips_instruction::kI) {
-      if (inst.op == 0x0F) {
+      if (inst.op == 0x0F) { // lui
         return;
-      } else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]) |
-          isHazard(number_of_instructions - last_write[inst.rt]);
+      } else if ((inst.op == 0x04 || inst.op == 0x05) && (inst.rs != 0 || inst.rt != 0)) { // beq, bne
+        // A branch that depends on the result of the previous instruction is a control hazard
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if (branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
+        // A branch that depends on the result of the previous instruction is a control hazard
+        number_of_control_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && (inst.rs != 0 && inst.rt != 0)) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage) |
+            isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && inst.rs != 0) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
+      } else if ((inst.op == 0x28 || inst.op == 0x29 || inst.op == 0x2B) && inst.rt != 0) {
+        // sb, sh, sw
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rt], pipeline_stage);
       } else if (inst.rs != 0) {
-        number_of_hazards += isHazard(number_of_instructions - last_write[inst.rs]);
+        number_of_data_hazards[pipeline_stage] += isHazard(number_of_instructions - last_write[inst.rs], pipeline_stage);
       }
     }
   }
 
-  int isHazard(int distance) {
-    return hazard_table[is_forwarding][pipeline_stage] >= distance;
+  int isHazard(int distance, pipeline_stages pipeline_stage) {
+    return hazard_table[is_fowarding][pipeline_stage] >= distance;
   }
 
   /**
    * Returns 0 if 'inst' isn't a branch instruction, 1 if it is but branch
    * is not taken, 2 if it is and branch is taken.
-   */
+   **/
   int actual_branch_taken(mips_instruction inst) {
     int taken = 0;
-    if (inst.type == mips_instruction::kI && branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
+    if (inst.type == mips_instruction::kI &&
+        branch_instructions.find(std::make_pair(inst.op, inst.func)) != branch_instructions.end()) {
       ++taken;
       total_number_of_branches++;
       switch (inst.op) {
-        case 0x01:
-          taken += inst.rt ? inst.rs >= 0 : inst.rs < 0;
-          break;
-        case 0x04:
-          taken += inst.rs == inst.rt;
-          break;
-        case 0x05:
-          taken += inst.rs != inst.rt;
-          break;
-        case 0x06:
-          taken += inst.rs <= 0;
-          break;
-        case 0x07:
-          taken += inst.rs > 0;
-          break;
+      case 0x01:
+        taken += inst.rt ? inst.rs >= 0 : inst.rs < 0;
+        break;
+      case 0x04:
+        taken += inst.rs == inst.rt;
+        break;
+      case 0x05:
+        taken += inst.rs != inst.rt;
+        break;
+      case 0x06:
+        taken += inst.rs <= 0;
+        break;
+      case 0x07:
+        taken += inst.rs > 0;
+        break;
       }
     }
     return taken;
@@ -227,10 +307,8 @@ struct variables {
 
   void update_saturating_counter(bool taken, int& stage) {
     stage += 2 * int(taken) - 1; // Adds 1 if taken, -1 otherwise
-    stage = std::min(stage, 3);
-    stage = std::max(stage, 0);
     // 0 <= stage < 2 * numberOfStages
-    // stage = std::min(std::max(stage, 2 * kNumberOfStages - 1), 0);
+    stage = std::max(std::min(stage, 2 * kNumberOfStages - 1), 0);
   }
 
   void saturating_branch_prediction(bool taken) {
@@ -248,31 +326,58 @@ struct variables {
     update_two_level_history(taken);
   }
 
+  // void generate read_and_write_log(mips instruction) {
+  //   FILE *f;
+  //   if (number_ofinstructions <= 1) {
+  //     f = fopen("read_write.txt", "w");
+  //   } else {
+  //     f = fopen("read_write.txt", "a");
+  //   }
+  //   if (!f) {
+  //     return;
+  //   }
+  //
+  //   if (ld_instructions.find(std::make_pair(inst.op, inst.func)) != ld_instructions.end()) {
+  //     fprintf(f, "r %d"); // w endereço tamanho
+  //   }
+  //
+  //   fclose(f);
+  // }
+
 } global;
 
-const std::set<std::pair<int, int>> variables::instructions_dont_write{
+const std::set<std::pair<int, int>> variables::instructions_dont_write {
   { 0, 0x8 },  // jr
-    { 0, 0x0C }, // syscall
-    { 0, 0x0D }, // break
-    { 0x04, 0 }, // beq
-    { 0x05, 0 }, // bne
-    { 0x06, 0 }, // blez
-    { 0x07, 0 }, // bgtz
-    { 0x01, 0 }, // bltz, bgez
-    { 0x28, 0 }, // sb
-    { 0x29, 0 }, // sh
-    { 0x2B, 0 }, // sw
-    { 0x39, 0 }  // swc1
+  { 0, 0x0C }, // syscall
+  { 0, 0x0D }, // break
+  { 0x04, 0 }, // beq
+  { 0x05, 0 }, // bne
+  { 0x06, 0 }, // blez
+  { 0x07, 0 }, // bgtz
+  { 0x01, 0 }, // bltz, bgez
+  { 0x28, 0 }, // sb
+  { 0x29, 0 }, // sh
+  { 0x2B, 0 }, // sw
+  { 0x39, 0 }  // swc1
   // bltzal, bgezal
 };
 
-const std::set<std::pair<int, int>> variables::branch_instructions{
+const std::set<std::pair<int, int>> variables::branch_instructions {
   { 0x04, 0 }, // beq
-    { 0x05, 0 }, // bne
-    { 0x06, 0 }, // blez
-    { 0x07, 0 }, // bgtz
-    { 0x01, 0 }  // bltz, bgez
+  { 0x05, 0 }, // bne
+  { 0x06, 0 }, // blez
+  { 0x07, 0 }, // bgtz
+  { 0x01, 0 }  // bltz, bgez
   // bltzal, bgezal
+};
+
+const std::set<std::pair<int, int>> variables::ld_instructions {
+  { 0x20, 0 }, // lb
+  { 0x24, 0 }, // lbu
+  { 0x21, 0 }, // lh
+  { 0x25, 0 }, // lhu
+  { 0x23, 0 }  // lw
+  // { 0x31, 0 }  // lwc1
 };
 
 // *****************************************************
@@ -294,44 +399,44 @@ void ac_behavior(instruction) {
 //! Instruction Format behavior methods.
 void ac_behavior(Type_R) {
   global.push({
-      mips_instruction::kR,
-      op,
-      rs,
-      rt,
-      rd,
-      shamt,
-      func,
-      0,
-      0
-      });
+    mips_instruction::kR,
+    op,
+    rs,
+    rt,
+    rd,
+    shamt,
+    func,
+    0,
+    0
+  });
 }
 
 void ac_behavior(Type_I) {
   global.push({
-      mips_instruction::kI,
-      op,
-      rs,
-      rt,
-      0,
-      0,
-      0,
-      0,
-      imm
-      });
+    mips_instruction::kI,
+    op,
+    rs,
+    rt,
+    0,
+    0,
+    0,
+    0,
+    imm
+  });
 }
 
 void ac_behavior(Type_J) {
   global.push({
-      mips_instruction::kJ,
-      op,
-      0,
-      0,
-      0,
-      0,
-      0,
-      addr,
-      0
-      });
+    mips_instruction::kJ,
+    op,
+    0,
+    0,
+    0,
+    0,
+    0,
+    addr,
+    0
+  });
 }
 
 //!Behavior called before starting simulation
@@ -340,7 +445,7 @@ void ac_behavior(begin) {
   RB[0] = 0;
   npc = ac_pc + 4;
 
-  // Is is not required by the architecture, but makes debug really easier
+  // It is not required by the architecture, but makes debug really easier
   for (int regNum = 0; regNum < 32; regNum++)
     RB[regNum] = 0;
   hi = 0;
@@ -354,14 +459,33 @@ void ac_behavior(end) {
   dbg_printf("@@@ end behavior @@@\n");
 
   printf("\n");
-  printf("******************************\n");
-  printf("Number of Instructions: %d\n", global.number_of_instructions);
-  printf("Number of data hazards: %d\n", global.number_of_hazards);
-  printf("Total number of branches: %d\n", global.total_number_of_branches);
-  printf("Wrong branch predictions (static): %d\n", global.static_wrong_predictions);
-  printf("Wrong branch predictions (saturating): %d\n", global.saturating_wrong_predictions);
-  printf("Wrong branch predictions (two level): %d\n", global.two_level_wrong_predictions);
-  printf("******************************\n");
+  printf("*******************************************************\n\n");
+  printf("Number of NOPS: %d\n", global.number_of_nops);
+  printf("Number of Instructions: %d\n\n", global.number_of_instructions);
+  printf("Number of data hazards    (5 stages):  %d\n", global.number_of_data_hazards[0]);
+  printf("Number of control hazards (5 stages):  %d\n", global.number_of_control_hazards[0]);
+  printf("Number of data hazards    (7 stages):  %d\n", global.number_of_data_hazards[1]);
+  printf("Number of control hazards (7 stages):  %d\n", global.number_of_control_hazards[1]);
+  printf("Number of data hazards    (13 stages): %d\n", global.number_of_data_hazards[2]);
+  printf("Number of control hazards (13 stages): %d\n\n", global.number_of_control_hazards[2]);
+  printf("Total number of branches:  %d\n\n", global.total_number_of_branches);
+  printf("Wrong branch predictions (static):     %d (%.2f \%)\n", global.static_wrong_predictions, ((float) global.static_wrong_predictions / global.total_number_of_branches) * 100);
+  printf("Wrong branch predictions (saturating): %d (%.2f \%)\n", global.saturating_wrong_predictions, ((float) global.saturating_wrong_predictions / global.total_number_of_branches) * 100);
+  printf("Wrong branch predictions (two level):  %d (%.2f \%)\n\n", global.two_level_wrong_predictions, ((float) global.two_level_wrong_predictions / global.total_number_of_branches) * 100);
+  // Processors
+  // 5 Stages -> MIPS R2000 -> branch misprediction penalty = 1 cycle
+  // 7 Stages -> MIPS R10000 -> branch misprediction penalty = 5 cycles
+  // 13 Stages -> ARM Cortex A8 -> branch misprediction penalty = 13 cycles
+  printf("Number of stall cycles (5 stages + static):      %d\n", global.static_wrong_predictions);
+  printf("Number of stall cycles (5 stages + saturating):  %d\n", global.saturating_wrong_predictions);
+  printf("Number of stall cycles (5 stages + two level):   %d\n", global.two_level_wrong_predictions);
+  printf("Number of stall cycles (7 stages + static):      %d\n", global.static_wrong_predictions * 5);
+  printf("Number of stall cycles (7 stages + saturating):  %d\n", global.saturating_wrong_predictions * 5);
+  printf("Number of stall cycles (7 stages + two level):   %d\n", global.two_level_wrong_predictions * 5);
+  printf("Number of stall cycles (13 stages + static):     %d\n", global.static_wrong_predictions * 13);
+  printf("Number of stall cycles (13 stages + saturating): %d\n", global.saturating_wrong_predictions * 13);
+  printf("Number of stall cycles (13 stages + two level):  %d\n", global.two_level_wrong_predictions * 13);
+  printf("\n*******************************************************\n");
 }
 
 //!Instruction lb behavior method.
@@ -987,3 +1111,4 @@ void ac_behavior(instr_break) {
   fprintf(stderr, "instr_break behavior not implemented.\n");
   exit(EXIT_FAILURE);
 }
+
