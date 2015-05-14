@@ -108,6 +108,27 @@ struct variables {
 
   std::vector<int> last_write;
 
+  // superscalar
+  struct _ss {
+    bool ssLoaded = false;
+    int ssInstCount = 0;
+  } ss;
+
+  void testSuperscalar() { // must be called after push
+    if (latest_instructions.size() < 2)
+      return;
+    mips_instruction &i_prev = latest_instructions[1];
+    mips_instruction &i_cur = latest_instructions[0];
+    if (!ss.ssLoaded) {
+      if (/* compare with prev and cur instr*/ 1) {
+        ss.ssLoaded = true;
+        ss.ssInstCount++;
+      }
+    }
+    else
+      ss.ssLoaded = false;
+  }
+
   variables():
     number_of_instructions(0),
     number_of_hazards(0),
@@ -358,6 +379,7 @@ void ac_behavior(end) {
   printf("Total number of branches: %d\n", global.total_number_of_branches);
   printf("Wrong branch predictions (static): %d\n", global.static_wrong_predictions);
   printf("Wrong branch predictions (saturating): %d\n", global.saturating_wrong_predictions);
+  printf("Superscaled instr count: %d\n", global.ss.ssInstCount);
   printf("******************************\n");
 }
 
