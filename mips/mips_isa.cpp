@@ -118,7 +118,6 @@ struct variables {
 
   std::vector<int> last_write;
 
-<<<<<<< HEAD
   // superscalar
   struct _ss {
     bool ssLoaded = false;
