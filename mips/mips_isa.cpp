@@ -316,6 +316,11 @@ struct variables {
     update_saturating_counter(taken, saturating_stage);
   }
 
+ /*
+  * Two_level_history contains the history of the last 'kHistoryDepth' actual
+  * branch decisions. This method updates that history, adding 'taken' and
+  * removing the oldest entry recorded on the history.
+  */
   void update_two_level_history(bool taken) {
     two_level_history = (two_level_history << 1 | taken) & ((1 << kHistoryDepth) - 1);
   }
