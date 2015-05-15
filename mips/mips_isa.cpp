@@ -24,6 +24,7 @@
 #include  "mips_isa_init.cpp"
 #include  "mips_bhv_macros.H"
 
+
 #include <deque>
 #include <set>
 #include <vector>
@@ -33,6 +34,9 @@
 // #define DEBUG_MODEL
 #include "ac_debug_model.H"
 
+extern "C" {
+#include "dinero_iv/d4.h"
+}
 
 //!User defined macros to reference registers.
 #define Ra 31
@@ -90,6 +94,8 @@ std::ostream& operator<<(std::ostream& os, const mips_instruction& inst) {
   return os;
 }
 
+char stupid_useless_placeholder[8]{"lolwut\n"};
+
 struct variables {
   unsigned int number_of_instructions; // Include NOP instructions
   unsigned int number_of_nops;
@@ -118,6 +124,20 @@ struct variables {
 
   std::vector<int> last_write;
 
+  // Cache-related.
+  struct CacheConfiguration {
+    d4cache* memory;
+    d4cache* l2_cache;
+    d4cache* instruction_l1_cache;
+    d4cache* data_l1_cache;
+    int l1_hit_latency;
+    int miss_penalty;
+  };
+  static constexpr int kNumCacheConfigurations = 4;
+  std::vector<CacheConfiguration> cache_configurations;
+  int num_memory_acesses = 0;
+  // End of cache-related variables.
+
   variables() :
     number_of_instructions(0),
     number_of_nops(0),
@@ -125,7 +145,8 @@ struct variables {
     saturating_wrong_predictions(0),
     total_number_of_branches(0),
     two_level_history(0),
-    saturating_stage(kNumberOfStages) {
+    saturating_stage(kNumberOfStages),
+    cache_configurations(kNumCacheConfigurations) {
     // kNumberOfStages is the first 'taken' value, as the stage range
     // is [0, 2 * kNumberOfStages). This initial value is arbitrary.
     two_level_stages.resize(1 << kHistoryDepth, (int) kNumberOfStages);
@@ -136,7 +157,124 @@ struct variables {
     // 5 Stages -> MIPS R2000 -> branch misprediction penalty = 1 cycle
     // 7 Stages -> MIPS R10000 -> branch misprediction penalty = 5 cycles
     // 13 Stages -> ARM Cortex A8 -> branch misprediction penalty = 13 cycles
-    hazard_table = { {2, 1, 1}, {1, 2, 3} };
+    hazard_table = { {2, 1, 1}, {1, 3, 4} };
+    // Cache initialization.
+    for (auto& cache_configuration : cache_configurations) {
+      cache_configuration.memory = d4new(NULL);
+      cache_configuration.l2_cache = d4new(cache_configuration.memory);
+      cache_configuration.instruction_l1_cache = d4new(cache_configuration.l2_cache);
+      cache_configuration.data_l1_cache = d4new(cache_configuration.l2_cache);
+
+      cache_configuration.l2_cache->lg2blocksize = 4;
+      cache_configuration.l2_cache->lg2subblocksize = 4;
+      cache_configuration.l2_cache->lg2size = 22;
+      cache_configuration.l2_cache->assoc = 1;
+      cache_configuration.l2_cache->replacementf = d4rep_lru;
+      cache_configuration.l2_cache->prefetchf = d4prefetch_none;
+      cache_configuration.l2_cache->wallocf = d4walloc_always;
+      cache_configuration.l2_cache->wbackf = d4wback_always;
+      cache_configuration.l2_cache->name_replacement = stupid_useless_placeholder;
+      cache_configuration.l2_cache->name_prefetch = stupid_useless_placeholder;
+      cache_configuration.l2_cache->name_walloc = stupid_useless_placeholder;
+      cache_configuration.l2_cache->name_wback = stupid_useless_placeholder;
+
+      cache_configuration.instruction_l1_cache->lg2blocksize = 4;
+      cache_configuration.instruction_l1_cache->lg2subblocksize = 4;
+      cache_configuration.instruction_l1_cache->lg2size = 15;
+      cache_configuration.instruction_l1_cache->assoc = 1;
+      cache_configuration.instruction_l1_cache->replacementf = d4rep_lru;
+      cache_configuration.instruction_l1_cache->prefetchf = d4prefetch_none;
+      cache_configuration.instruction_l1_cache->wallocf = d4walloc_always;
+      cache_configuration.instruction_l1_cache->wbackf = d4wback_always;
+      cache_configuration.instruction_l1_cache->name_replacement = stupid_useless_placeholder;
+      cache_configuration.instruction_l1_cache->name_prefetch = stupid_useless_placeholder;
+      cache_configuration.instruction_l1_cache->name_walloc = stupid_useless_placeholder;
+      cache_configuration.instruction_l1_cache->name_wback = stupid_useless_placeholder;
+
+      cache_configuration.data_l1_cache->lg2blocksize = 4;
+      cache_configuration.data_l1_cache->lg2subblocksize = 4;
+      cache_configuration.data_l1_cache->lg2size = 15;
+      cache_configuration.data_l1_cache->assoc = 1;
+      cache_configuration.data_l1_cache->replacementf = d4rep_lru;
+      cache_configuration.data_l1_cache->prefetchf = d4prefetch_none;
+      cache_configuration.data_l1_cache->wallocf = d4walloc_always;
+      cache_configuration.data_l1_cache->wbackf = d4wback_always;
+      cache_configuration.data_l1_cache->name_replacement = stupid_useless_placeholder;
+      cache_configuration.data_l1_cache->name_prefetch = stupid_useless_placeholder;
+      cache_configuration.data_l1_cache->name_walloc = stupid_useless_placeholder;
+      cache_configuration.data_l1_cache->name_wback = stupid_useless_placeholder;
+    }
+    
+    // Cache configuration #0
+    cache_configurations[0].l2_cache->lg2blocksize = 4;
+    cache_configurations[0].l2_cache->lg2subblocksize = 4;
+    cache_configurations[0].l2_cache->lg2size = 20;
+    cache_configurations[0].l2_cache->assoc = 2;
+    cache_configurations[0].instruction_l1_cache->lg2blocksize = 4;
+    cache_configurations[0].instruction_l1_cache->lg2subblocksize = 4;
+    cache_configurations[0].instruction_l1_cache->lg2size = 15;
+    cache_configurations[0].instruction_l1_cache->assoc = 2;
+    cache_configurations[0].data_l1_cache->lg2blocksize = 4;
+    cache_configurations[0].data_l1_cache->lg2subblocksize = 4;
+    cache_configurations[0].data_l1_cache->lg2size = 15;
+    cache_configurations[0].data_l1_cache->assoc = 2;
+    cache_configurations[0].l1_hit_latency = 4;
+    cache_configurations[0].miss_penalty = 30;
+
+    // Cache configuration #1
+    cache_configurations[1].l2_cache->lg2blocksize = 4;
+    cache_configurations[1].l2_cache->lg2subblocksize = 4;
+    cache_configurations[1].l2_cache->lg2size = 22;
+    cache_configurations[1].l2_cache->assoc = 2;
+    cache_configurations[1].instruction_l1_cache->lg2blocksize = 4;
+    cache_configurations[1].instruction_l1_cache->lg2subblocksize = 4;
+    cache_configurations[1].instruction_l1_cache->lg2size = 15;
+    cache_configurations[1].instruction_l1_cache->assoc = 2;
+    cache_configurations[1].data_l1_cache->lg2blocksize = 4;
+    cache_configurations[1].data_l1_cache->lg2subblocksize = 4;
+    cache_configurations[1].data_l1_cache->lg2size = 15;
+    cache_configurations[1].data_l1_cache->assoc = 2;
+    cache_configurations[1].l1_hit_latency = 4;
+    cache_configurations[1].miss_penalty = 30;
+
+    // Cache configuration #2
+    cache_configurations[2].l2_cache->lg2blocksize = 4;
+    cache_configurations[2].l2_cache->lg2subblocksize = 4;
+    cache_configurations[2].l2_cache->lg2size = 20;
+    cache_configurations[2].l2_cache->assoc = 2;
+    cache_configurations[2].instruction_l1_cache->lg2blocksize = 4;
+    cache_configurations[2].instruction_l1_cache->lg2subblocksize = 4;
+    cache_configurations[2].instruction_l1_cache->lg2size = 16;
+    cache_configurations[2].instruction_l1_cache->assoc = 2;
+    cache_configurations[2].data_l1_cache->lg2blocksize = 4;
+    cache_configurations[2].data_l1_cache->lg2subblocksize = 4;
+    cache_configurations[2].data_l1_cache->lg2size = 16;
+    cache_configurations[2].data_l1_cache->assoc = 2;
+    cache_configurations[2].l1_hit_latency = 13;
+    cache_configurations[2].miss_penalty = 30;
+
+    // Cache configuration #3
+    cache_configurations[3].l2_cache->lg2blocksize = 4;
+    cache_configurations[3].l2_cache->lg2subblocksize = 4;
+    cache_configurations[3].l2_cache->lg2size = 22;
+    cache_configurations[3].l2_cache->assoc = 2;
+    cache_configurations[3].instruction_l1_cache->lg2blocksize = 4;
+    cache_configurations[3].instruction_l1_cache->lg2subblocksize = 4;
+    cache_configurations[3].instruction_l1_cache->lg2size = 16;
+    cache_configurations[3].instruction_l1_cache->assoc = 2;
+    cache_configurations[3].data_l1_cache->lg2blocksize = 4;
+    cache_configurations[3].data_l1_cache->lg2subblocksize = 4;
+    cache_configurations[3].data_l1_cache->lg2size = 16;
+    cache_configurations[3].data_l1_cache->assoc = 2;
+    cache_configurations[3].l1_hit_latency = 13;
+    cache_configurations[3].miss_penalty = 30;
+
+    int cache_setup_error{d4setup()};
+    if (cache_setup_error) {
+      std::cerr << "Error on cache setup. I'm calling std::exit(EXIT_FAILURE).\n";
+      std::exit(EXIT_FAILURE);
+    }
+    // End of cache initialization.
   }
 
   void push(mips_instruction inst) {
@@ -349,6 +487,38 @@ struct variables {
   //   fclose(f);
   // }
 
+  void SimulateFetchInstructionFromCaches(const d4addr address) {
+    d4memref memory_reference;
+    memory_reference.address = static_cast<d4addr>(address);
+    memory_reference.size = 4;
+    memory_reference.accesstype = D4XINSTRN;
+    for (auto& cache_configuration : cache_configurations) {
+      d4ref(cache_configuration.instruction_l1_cache, memory_reference);
+    }
+  }
+
+  void SimulateLoadDataFromCaches(const d4addr address) {
+    d4memref memory_reference;
+    memory_reference.address = static_cast<d4addr>(address & ~3);
+    memory_reference.size = 4;
+    memory_reference.accesstype = D4XREAD;
+    for (auto& cache_configuration : cache_configurations) {
+      d4ref(cache_configuration.instruction_l1_cache, memory_reference);
+    }
+    num_memory_acesses++;
+  }
+
+  void SimulateStoreDataInCaches(const d4addr address) {
+    d4memref memory_reference;
+    memory_reference.address = static_cast<d4addr>(address & ~3);
+    memory_reference.size = 4;
+    memory_reference.accesstype = D4XWRITE;
+    for (auto& cache_configuration : cache_configurations) {
+      d4ref(cache_configuration.instruction_l1_cache, memory_reference);
+    }
+    num_memory_acesses++;
+  }
+
 } global;
 
 const std::set<std::pair<int, int>> variables::instructions_dont_write {
@@ -392,7 +562,9 @@ void ac_behavior(instruction) {
 
   global.number_of_instructions++;
   global.pc_addr = npc;
-
+  // Simulates instruction fetch from instruction L1 cache.
+  global.SimulateFetchInstructionFromCaches(ac_pc);
+  // End of cache simulation.
   dbg_printf("----- PC=%#x ----- %lld\n", (int)ac_pc, ac_instr_counter);
   //  dbg_printf("----- PC=%#x NPC=%#x ----- %lld\n", (int) ac_pc, (int)npc, ac_instr_counter);
 #ifndef NO_NEED_PC_UPDATE
@@ -491,6 +663,19 @@ void ac_behavior(end) {
   printf("Number of stall cycles (13 stages + saturating): %d\n", global.saturating_wrong_predictions * 13);
   printf("Number of stall cycles (13 stages + two level):  %d\n", global.two_level_wrong_predictions * 13);
   printf("\n*******************************************************\n");
+
+  // Cache simulation results.
+  std::cout << "Cache results:\n";
+  std::cout << "Number of memory accesses: " << global.num_memory_acesses << "\n";
+  for (int cache_configuration_num = 0; cache_configuration_num != variables::kNumCacheConfigurations; ++cache_configuration_num) {
+    std::cout << "Cache configuration #" << cache_configuration_num << ":\n";
+    std::cout << "Instruction fetch misses: " << global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XINSTRN] << "\n";
+    std::cout << "Data load misses: " << global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XREAD] << "\n";
+    std::cout << "Data store misses: " << global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XWRITE] << "\n";
+    int total_misses = global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XINSTRN] + global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XREAD] + global.cache_configurations[cache_configuration_num].l2_cache->miss[D4XWRITE];
+    std::cout << "Stall cyles: " << global.num_memory_acesses * global.cache_configurations[cache_configuration_num].l1_hit_latency + total_misses * global.cache_configurations[cache_configuration_num].miss_penalty << "\n";
+  }
+  // End of cache simulation results.
 }
 
 //!Instruction lb behavior method.
@@ -506,6 +691,9 @@ void ac_behavior(lb) {
   RB[rt] = (ac_Sword)byte;
 
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction lbu behavior method.
@@ -520,6 +708,9 @@ void ac_behavior(lbu) {
 
   RB[rt] = byte;
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction lh behavior method.
@@ -534,6 +725,9 @@ void ac_behavior(lh) {
 
   RB[rt] = (ac_Sword)half;
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction lhu behavior method.
@@ -548,6 +742,9 @@ void ac_behavior(lhu) {
 
   RB[rt] = half;
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction lw behavior method.
@@ -555,6 +752,9 @@ void ac_behavior(lw) {
   dbg_printf("lw r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   RB[rt] = DM.read(RB[rs] + imm);
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(RB[rs] + imm);
+  // End of cache simulation.
 };
 
 //!Instruction lwl behavior method.
@@ -570,6 +770,9 @@ void ac_behavior(lwl) {
   data |= RB[rt] & ((1 << offset) - 1);
   RB[rt] = data;
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(addr);
+  // End of cache simulation.
 };
 
 //!Instruction lwr behavior method.
@@ -585,6 +788,9 @@ void ac_behavior(lwr) {
   data |= RB[rt] & (0xFFFFFFFF << (32 - offset));
   RB[rt] = data;
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateLoadDataFromCaches(addr);
+  // End of cache simulation.
 };
 
 //!Instruction sb behavior method.
@@ -602,6 +808,9 @@ void ac_behavior(sb) {
   DM.write(address & ~3, data);
 
   dbg_printf("Result = %#x\n", (int)byte);
+  // Cache simulation.
+  global.SimulateStoreDataInCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction sh behavior method.
@@ -619,6 +828,9 @@ void ac_behavior(sh) {
   DM.write(address & ~3, data);
 
   dbg_printf("Result = %#x\n", (int)half);
+  // Cache simulation.
+  global.SimulateStoreDataInCaches(address);
+  // End of cache simulation.
 };
 
 //!Instruction sw behavior method.
@@ -626,6 +838,9 @@ void ac_behavior(sw) {
   dbg_printf("sw r%d, %d(r%d)\n", rt, imm & 0xFFFF, rs);
   DM.write(RB[rs] + imm, RB[rt]);
   dbg_printf("Result = %#x\n", RB[rt]);
+  // Cache simulation.
+  global.SimulateStoreDataInCaches(RB[rs] + imm);
+  // End of cache simulation.
 };
 
 //!Instruction swl behavior method.
@@ -641,6 +856,9 @@ void ac_behavior(swl) {
   data |= DM.read(addr & 0xFFFFFFFC) & (0xFFFFFFFF << (32 - offset));
   DM.write(addr & 0xFFFFFFFC, data);
   dbg_printf("Result = %#x\n", data);
+  // Cache simulation.
+  global.SimulateStoreDataInCaches(addr);
+  // End of cache simulation.
 };
 
 //!Instruction swr behavior method.
@@ -656,6 +874,9 @@ void ac_behavior(swr) {
   data |= DM.read(addr & 0xFFFFFFFC) & ((1 << offset) - 1);
   DM.write(addr & 0xFFFFFFFC, data);
   dbg_printf("Result = %#x\n", data);
+  // Cache simulation.
+  global.SimulateStoreDataInCaches(addr);
+  // End of cache simulation.
 };
 
 //!Instruction addi behavior method.

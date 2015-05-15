@@ -26,11 +26,11 @@ TARGET_ARCH :=  linux64
 
 
 
-INC_DIR := -I. -I/home/staff/rodolfo/mc723/archc/include/archc -I$(SYSTEMC)/include 
-LIB_DIR := -L. -L$(SYSTEMC)/lib-$(TARGET_ARCH) -L/home/staff/rodolfo/mc723/archc/lib
+INC_DIR := -I. -I/home/staff/rodolfo/mc723/archc/include/archc -I$(SYSTEMC)/include -I./dinero_iv
+LIB_DIR := -L. -L$(SYSTEMC)/lib-$(TARGET_ARCH) -L/home/staff/rodolfo/mc723/archc/lib -L./dinero_iv
 
 LIB_SYSTEMC := -lsystemc
-LIBS := $(LIB_SYSTEMC) -lm $(EXTRA_LIBS) -larchc
+LIBS := $(LIB_SYSTEMC) -lm $(EXTRA_LIBS) -larchc -ld4
 CC :=   g++
 
 OPT :=   -O3
