@@ -130,7 +130,7 @@ struct variables {
   struct IGroup {
     InstGroups igroup;
     int readFrom, writeTo;
-    std::set<pair<int,int>> instOp; // <opc, func>
+    std::set<std::pair<int,int>> instOp; // <opc, func>
   };
   const static std::vector<IGroup> groups {
     {ArithLog, Rs|Rt, Rd, {{0,0x20},{0,0x21},{0,0x24},{0,0x27},{0,0x25},
@@ -180,9 +180,9 @@ struct variables {
 
       const IGroup *g_prev=nullptr, *g_cur=nullptr;
       for (const IGroup &g : groups) { // search prev and cur inst groups
-        if (g.instOp.count(make_pair(i_prev.op, i_prev.func)))
+        if (g.instOp.count(std::make_pair(i_prev.op, i_prev.func)))
           g_prev = &g;
-        if (g.instOp.count(make_pair(i_cur.op, i_cur.func)))
+        if (g.instOp.count(std::make_pair(i_cur.op, i_cur.func)))
           g_cur = &g;
       }
       if (!g_prev || !g_cur)
