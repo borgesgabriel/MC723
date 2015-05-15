@@ -132,7 +132,7 @@ struct variables {
     int readFrom, writeTo;
     std::set<std::pair<int,int>> instOp; // <opc, func>
   };
-  const static std::vector<IGroup> groups {
+  const std::vector<IGroup> groups {
     {ArithLog, Rs|Rt, Rd, {{0,0x20},{0,0x21},{0,0x24},{0,0x27},{0,0x25},
         {0,0x22},{0,0x23},{0,0x26},{0,0x2a},{0,0x29}}},
     {DivMult, Rs|Rt, Rm, {{0,0x1a},{0,0x1b},{0,0x18},{0,0x19}}},
