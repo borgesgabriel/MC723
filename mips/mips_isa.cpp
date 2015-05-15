@@ -124,16 +124,91 @@ struct variables {
     int ssInstCount = 0;
   } ss;
 
+  static constexpr int Rd=1, Rs=2, Rt=4, Rm=8;
+  enum InstGroups {ArithLog, DivMult, Shift, ShiftV, JumpR, MoveFrom, MoveTo,
+    ArithLogI, LoadI, Branch, BranchZ, LoadStore, Jump, Trap};
+  struct IGroup {
+    InstGroups igroup;
+    int readFrom, writeTo;
+    std::set<pair<int,int>> instOp; // <opc, func>
+  };
+  const static std::vector<IGroup> groups {
+    {ArithLog, Rs|Rt, Rd, {{0,0x20},{0,0x21},{0,0x24},{0,0x27},{0,0x25},
+        {0,0x22},{0,0x23},{0,0x26},{0,0x2a},{0,0x29}}},
+    {DivMult, Rs|Rt, Rm, {{0,0x1a},{0,0x1b},{0,0x18},{0,0x19}}},
+    {Shift, Rt, Rd, {{0,0x0},{0,0x3},{0,0x2}}},
+    {ShiftV, Rs|Rt, Rd, {{0,0x4},{0,0x7},{0,0x6}}},
+    {JumpR, Rs, 0, {{0,0x9},{0,0x8}}},
+    {MoveFrom, Rm, Rd, {{0,0x10},{0,0x12}}},
+    {MoveTo, Rs, Rm, {{0,0x11},{0,0x13}}},
+    {ArithLogI, Rs, Rt, {{0x8,0},{0x9,0},{0xc,0},{0xd,0},{0xe,0},{0xa,0},
+        {0x9,0}}},
+    {LoadI, 0, Rt, {{0x19,0},{0x18,0}}},
+    {Branch, Rs|Rt, 0, {{0x4,0},{0x5,0}}},
+    {BranchZ, Rs, 0, {{0x7,0},{0x6,0}}},
+    {LoadStore, Rs|Rt, Rs|Rt, {{0x20,0},{0x24,0},{0x21,0},{0x25,0},{0x23,0},
+        {0x28,0},{0x29,0},{0x2b,0}}},
+    {Jump, 0, 0, {{0x2,0},{0x3,0}}},
+    {Trap, 0, 0, {{0x1a,0}}}
+  };
+
+  std::set<int> getRegs(const mips_instruction &i, int regs) {
+    std::set<int> S;
+    if (regs&Rs)
+      S.insert(i.rs);
+    if (regs&Rt)
+      S.insert(i.rt);
+    if (regs&Rd)
+      S.insert(i.rd);
+    return S;
+  }
+  
+  bool setHasIntersec(const std::set<int> &A, const std::set<int> &B) {
+    for (const int &a : A)
+      for (const int &b : B)
+        if (a==b)
+          return true;
+    return false;
+  }
+
   void testSuperscalar() { // must be called after push
     if (latest_instructions.size() < 2)
       return;
-    mips_instruction &i_prev = latest_instructions[1];
-    mips_instruction &i_cur = latest_instructions[0];
     if (!ss.ssLoaded) {
-      if (/* compare with prev and cur instr*/ 1) {
-        ss.ssLoaded = true;
-        ss.ssInstCount++;
+      mips_instruction &i_prev = latest_instructions[1];
+      mips_instruction &i_cur = latest_instructions[0];
+
+      const IGroup *g_prev=nullptr, *g_cur=nullptr;
+      for (const IGroup &g : groups) { // search prev and cur inst groups
+        if (g.instOp.count(make_pair(i_prev.op, i_prev.func)))
+          g_prev = &g;
+        if (g.instOp.count(make_pair(i_cur.op, i_cur.func)))
+          g_cur = &g;
       }
+      if (!g_prev || !g_cur)
+        return; // error, shouldnt happen. just in case.
+      if (g_prev->igroup == g_cur->igroup && g_cur->igroup != ArithLog &&
+            g_cur->igroup != ArithLogI) // same group, abort, except arith ops
+        return;
+      if ((g_prev->readFrom & g_cur->writeTo & Rm) ||
+            (g_prev->writeTo & g_cur->readFrom & Rm) ||
+             (g_prev->writeTo & g_cur->writeTo & Rm)) 
+        return ; // conflict in special multiplier registers
+
+      // get register values for cur and prev instruction, read and write registers
+      std::set<int> rd_prev = getRegs(i_prev, g_prev->readFrom);
+      std::set<int> wr_prev = getRegs(i_prev, g_prev->writeTo);
+      std::set<int> rd_cur = getRegs(i_cur, g_cur->readFrom);
+      std::set<int> wr_cur = getRegs(i_cur, g_cur->writeTo);
+      // if any conflict, abort: r-w, r-w, w-w => return
+      if (setHasIntersec(rd_prev, wr_cur)||
+          setHasIntersec(rd_cur, wr_prev)||
+          setHasIntersec(wr_prev, wr_cur))
+        return;
+      
+      // if no conflict so far, set bool and increment
+      ss.ssLoaded = true;
+      ss.ssInstCount++;
     }
     else
       ss.ssLoaded = false;
@@ -435,6 +510,7 @@ void ac_behavior(Type_R) {
     0,
     0
   });
+  global.testSuperscalar();
 }
 
 void ac_behavior(Type_I) {
@@ -449,6 +525,7 @@ void ac_behavior(Type_I) {
     0,
     imm
   });
+  global.testSuperscalar();
 }
 
 void ac_behavior(Type_J) {
@@ -463,6 +540,7 @@ void ac_behavior(Type_J) {
     addr,
     0
   });
+  global.testSuperscalar();
 }
 
 //!Behavior called before starting simulation
